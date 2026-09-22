@@ -24,6 +24,10 @@ Rion 的通用 Skill 合集 `rionwu-skills` 只负责收录、发现和链接本
 
 ## 安装
 
+**9月22日接入更新：** 已增加材料编码/格式兼容、明确错误码、独立解密计数和`diagnose`诊断。JEV可选辅助分流，但不参与密钥验证；Windows首次获取仍待真机验收。见[更新与排障提示词](docs/access-upgrade-2026-09-22.md)。
+
+向维护者反馈前，让本地Codex运行`access.sh diagnose --support-summary`；Windows用Reader环境的Python运行`rion_wechat_access.py diagnose --support-summary`。它只输出允许分享的版本、状态、计数和错误码，仍请本人检查后再发。只有网页对话、没有本机文件及命令执行能力时，无法直接接入本机微信。另一个工具已能读取时，优先验证已有材料或已解密数据库，不要求重新获取；见[常见卡点处理](docs/access-support.md)。
+
 ### 直接让Codex安装和配置
 
 把下面这段发给Codex即可，不需要自己逐条执行命令：
@@ -51,10 +55,12 @@ cd wechat-intelligence-hub
 安装完整产品：
 
 ```bash
-./scripts/install.sh --with-sqlcipher
+./scripts/install.sh --with-sqlcipher --with-html
 ```
 
 不传 Skill 名称时会安装 `wechat-cli`、`wechat-intelligence-hub` 及其本地引擎。即使只指定 `wechat-intelligence-hub`，安装器也会自动补齐它依赖的 `wechat-cli`；用户不需要手工拼装两套组件。
+
+`--with-html` 在 Hub 自己的 `.venv` 安装固定版本的 HTML 净化依赖 `nh3`，不修改全局 Python；HTML 还需要本机 Pandoc。没有该依赖时，HTML 生成会明确报错，不降级为未净化页面；纯 Markdown/检索仍可用。已有安装请让 Codex 先确认实际引擎路径、备份代码再升级，保留 Profile、数据库和 key。安装器不会覆盖已有目录。安全改动、影响和回归方法见[升级说明](docs/upgrade-2026-09-14.md)。
 
 安装后可以直接对Codex说：
 
@@ -72,6 +78,14 @@ rion-wechat-cli access-plan --pretty
 ```
 
 `ready` 表示复用已有配置；`ready_to_configure` 才继续用相同输入运行 `setup`；`needs_access` 表示缺少访问材料，不要重复运行setup。JSON顶层 `ok: true` 仅表示诊断完成，请查看 `data.state`。部分覆盖、驱动缺失、多账号和权限问题会分别给出下一步。
+
+**卡在找key、反复退出微信？** 先让Codex运行`access.sh status`，根据失败阶段继续处理。新助手支持账号目录自动适配、相对路径材料转换、Reader `salt_keys`复用，以及获取前的文件/调试器检查。不要上传原始日志或key。具体见[接入排障表](skills/wechat-cli/references/access-troubleshooting.md)和[本轮接入升级及仍未解决的兼容项](docs/access-upgrade-2026-09-14.md)。这些改动不代表任意Mac/Windows版本都能自动取得key。
+
+维护者和兼容测试用户可查看[macOS接入候选补丁](providers/wxkey/README.md)：包含上游Intel修复、进程身份核验、等待超时与清理改进。仓库只附补丁和准备脚本，不附可执行获取工具；它尚未通过新机器真实微信获取验收，不是默认安装步骤。
+
+**Windows反馈更新（9月17日）：** 社区报告微信4.1.13.12接通，但本地获取分支未合入，不能宣称Windows一键可用。Reader新增真实ACL检查与私有输出保护；目前通过模拟测试，Windows真机仍待验收。具体排障与Codex提示词见[Windows接入指引](skills/wechat-cli/references/windows-access.md)。
+
+接入助手还会提示复用已存在的wxcli材料，并在启动获取工具前检查LLDB关键接口。数据库验证成功后仍需确认微信恢复；`finish-recovery`只在用户事后确认和进程检查通过后移除恢复锁，正常查询不受该锁影响。
 
 完整历史和实时数据库读取要求有权访问的本地数据库与访问材料，且仅覆盖已同步到本机的数据。只读 Reader 与可选接入助手的边界见 [Reader 说明](projects/rion-wechat-reader/README.md)。没有数据库读取条件时，仍可运行全虚构 Demo，验证索引、判断与报告链路。
 

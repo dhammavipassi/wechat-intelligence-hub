@@ -19,6 +19,9 @@ ROOT_FILES = {
     "opportunity_store.py",
     "report_bundle_flagship.py",
     "report_bundle_html.py",
+    "report_security.py",
+    "requirements-html.txt",
+    "message_time.py",
     "wechat_intelligence_hub.py",
     "wechat_deal_radar.py",
 }

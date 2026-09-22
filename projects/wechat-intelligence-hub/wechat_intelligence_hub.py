@@ -49,6 +49,8 @@ from intelligence_views import (
     topic_report,
 )
 from report_bundle_html import render_report_bundle
+from report_security import protect_document, require_sanitizer, safe_href, sanitize_fragment
+from message_time import local_timestamp as display_timestamp, parse_timestamp, register_time_sql, timestamp_epoch, validate_window
 
 
 def default_wechat_reader_path() -> str:
@@ -586,6 +588,7 @@ class Signal:
 
 
 def normalize_time(value: str | None) -> str:
+    # Keep the storage representation stable: historical message hashes include it.
     if not value:
         return ""
     value = str(value).replace("/", "-").strip()
@@ -598,15 +601,7 @@ def normalize_time(value: str | None) -> str:
 
 
 def parse_time_for_filter(value: str | None) -> datetime | None:
-    normalized = normalize_time(value)
-    if not normalized:
-        return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(normalized, fmt)
-        except ValueError:
-            continue
-    return None
+    return parse_timestamp(display_timestamp(value))
 
 
 def read_json_messages(path: Path) -> list[Message]:
@@ -3046,7 +3041,7 @@ def write_group_daily_html(
 
     link_items = "".join(
         "<li>"
-        f'<a href="{html_escape(str(row.get("链接") or ""), quote=True)}" target="_blank" rel="noopener noreferrer">'
+        f'<a href="{html_escape(safe_href(str(row.get("链接") or "")) or "#", quote=True)}" target="_blank" rel="noopener noreferrer">'
         f'{html_escape(shorten(str(row.get("链接") or ""), 90))}</a>'
         f'<span>{html_escape(str(row.get("相关群聊") or ""))}｜{html_escape(str(row.get("判断依据") or ""))}</span>'
         "</li>"
@@ -3129,7 +3124,7 @@ function apply(){{const q=search.value.trim().toLowerCase(); rows.forEach(row=>{
 search.addEventListener('input',apply); buttons.forEach(button=>button.addEventListener('click',()=>{{filter=button.dataset.filter; buttons.forEach(item=>item.setAttribute('aria-pressed',String(item===button))); apply();}}));
 apply();
 </script></body></html>"""
-    path.write_text(html, encoding="utf-8")
+    path.write_text(protect_document(html), encoding="utf-8")
 
 
 def clean_url(raw_url: str) -> str:
@@ -5064,7 +5059,10 @@ def brief_command(args: argparse.Namespace) -> None:
         print(text)
 
 
-CONTACT_ACK_TERMS = re.compile(r"^(?:好(?:的|呀|滴)?|收到|明白|嗯嗯|没问题|可以|谢谢|辛苦了?|不客气)[呀啊哈啦~～。！!\s]*$", re.I)
+CONTACT_ACK_TERMS = re.compile(
+    r"^(?:(?:好(?:的|呀|滴)?|收到|明白|嗯嗯|没问题|可以|谢谢(?:老师)?|辛苦(?:老师)?了?|不客气)"
+    r"[呀啊哈啦~～，,、。！!\s]*)+$", re.I,
+)
 CONTACT_REPLY_REQUEST_TERMS = re.compile(
     r"请问|麻烦|方便|能否|可以吗|怎么|多少|什么时候|哪天|确认一下|回复一下|发我|给我|"
     r"报价|预算|费用|价格|brief|排期|初稿|二稿|终稿|审核|修改|结算|付款|发票|invoice|payment|\?|？",
@@ -5111,6 +5109,7 @@ def find_open_contact_promise(
     *,
     lookback_days: int = 30,
 ) -> dict[str, str] | None:
+    register_time_sql(conn)
     until_dt = parse_time_for_filter(until) or datetime.now()
     history_since = (until_dt - timedelta(days=max(1, lookback_days))).strftime("%Y-%m-%d %H:%M:%S")
     history = [
@@ -5119,8 +5118,8 @@ def find_open_contact_promise(
             """
             select sender, time, content
             from messages
-            where chat = ? and time >= ? and time <= ?
-            order by time asc
+            where chat = ? and message_epoch(time) >= message_epoch(?) and message_epoch(time) <= message_epoch(?)
+            order by message_epoch(time) asc, id asc
             """,
             (chat, history_since, until),
         ).fetchall()
@@ -5156,12 +5155,14 @@ def build_contact_daily_rows(
     label_index: dict[str, set[str]],
     self_names: list[str],
 ) -> list[dict[str, Any]]:
+    register_time_sql(conn)
+    validate_window(since, until)
     db_rows = conn.execute(
         """
         select chat, sender, time, content, source_file
         from messages
-        where time >= ? and time <= ?
-        order by time asc
+        where message_epoch(time) >= message_epoch(?) and message_epoch(time) <= message_epoch(?)
+        order by message_epoch(time) asc, id asc
         """,
         (since, until),
     ).fetchall()
@@ -5201,7 +5202,7 @@ def build_contact_daily_rows(
         if label not in GROUP_VALUE_PATTERNS
     }
     for chat, messages in by_chat.items():
-        messages = sorted(dedupe_messages(messages), key=lambda message: message.time or "")
+        messages = sorted(dedupe_messages(messages), key=lambda message: timestamp_epoch(message.time) or 0)
         if chat == "服务通知" or all(
             "notifymessage" in message.source_file or message.sender.endswith("@app")
             for message in messages
@@ -5891,28 +5892,30 @@ def render_report_command(args: argparse.Namespace) -> None:
         raise SystemExit("生成 HTML 需要 pandoc。Markdown 报告不受影响；安装 pandoc 后重试即可。")
 
     output = Path(args.out).expanduser().resolve() if args.out else source.with_suffix(".html")
-    output.parent.mkdir(parents=True, exist_ok=True)
+    require_sanitizer()
     css = Path(args.css).expanduser().resolve() if args.css else Path(__file__).resolve().parent / "assets" / "report.css"
     command = [
         pandoc,
         str(source),
-        "--from=gfm",
+        "--sandbox",
+        "--from=gfm-raw_html",
         "--to=html5",
-        "--standalone",
-        "--embed-resources",
-        "--metadata",
-        "lang=zh-CN",
-        "--metadata",
-        f"title={args.title or source.stem}",
-        "--output",
-        str(output),
     ]
-    if css.is_file():
-        command.extend(["--css", str(css)])
-    result = subprocess.run(command, text=True, capture_output=True)
+    result = subprocess.run(command, text=True, capture_output=True, timeout=60)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "pandoc 转换失败").strip()
         raise SystemExit(detail)
+    fragment = sanitize_fragment(result.stdout)
+    style = css.read_text(encoding="utf-8") if css.is_file() else ""
+    style = re.sub(r"</style", r"<\\/style", style, flags=re.I)
+    document = (
+        '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f'<title>{html_escape(args.title or source.stem)}</title><style>{style}</style>'
+        f'</head><body><main>{fragment}</main></body></html>'
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(protect_document(document, static=True), encoding="utf-8")
     print(f"输入 Markdown：{source}")
     print(f"最终 HTML：{output}")
 

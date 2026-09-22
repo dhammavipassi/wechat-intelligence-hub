@@ -6,6 +6,8 @@ import re
 import sqlite3
 from typing import Any, Iterable
 
+from message_time import register_time_sql, timestamp_epoch, validate_window
+
 
 COMMERCIAL_TERMS = re.compile(
     r"合作|商单|推广|投放|品牌|报价|预算|brief|排期|发布|审核|结算|付款|"
@@ -65,7 +67,7 @@ def normalize_since(value: str | None) -> str:
 
 def is_self_sender(sender: str, self_names: Iterable[str]) -> bool:
     folded = sender.strip().casefold()
-    return any(folded == name.strip().casefold() or folded.startswith(name.strip().casefold()) for name in self_names)
+    return bool(folded) and any(folded == name.strip().casefold() for name in self_names if name.strip())
 
 
 def known_group_chats(conn: sqlite3.Connection) -> set[str]:
@@ -121,9 +123,10 @@ def infer_promise_action(content: str) -> str:
 
 
 def resolve_chat_name(conn: sqlite3.Connection, query: str) -> str:
+    register_time_sql(conn)
     rows = conn.execute(
         """
-        select chat, count(*) as message_count, max(time) as last_time
+        select chat, count(*) as message_count, max(message_epoch(time)) as last_time
         from messages
         where lower(chat) like ?
         group by chat
@@ -731,14 +734,16 @@ def topic_report(
 
 
 def _window_messages(conn: sqlite3.Connection, since: str, until: str, limit: int = 12000) -> list[dict[str, Any]]:
+    register_time_sql(conn)
+    validate_window(since, until)
     return [
         dict(row)
         for row in conn.execute(
             """
             select chat, sender, time, content, source_file
             from messages
-            where time >= ? and time < ?
-            order by time asc
+            where message_epoch(time) >= message_epoch(?) and message_epoch(time) < message_epoch(?)
+            order by message_epoch(time) asc, id asc
             limit ?
             """,
             (since, until, limit),
@@ -758,24 +763,20 @@ def brief_report(
     since_dt = current - timedelta(hours=max(1, hours))
     previous_since_dt = since_dt - timedelta(hours=max(1, hours))
     fmt = "%Y-%m-%d %H:%M:%S"
-    current_rows = _window_messages(conn, since_dt.strftime(fmt), current.strftime(fmt))
-    previous_rows = _window_messages(conn, previous_since_dt.strftime(fmt), since_dt.strftime(fmt))
+    current_rows = _window_messages(conn, since_dt.isoformat(), current.isoformat())
+    previous_rows = _window_messages(conn, previous_since_dt.isoformat(), since_dt.isoformat())
     groups = known_group_chats(conn)
 
     def chat_count(rows: list[dict[str, Any]]) -> int:
         return len({str(row["chat"]) for row in rows})
 
-    latest_db_time = str(conn.execute("select max(time) from messages").fetchone()[0] or "")
+    latest_row = conn.execute("select time from messages order by message_epoch(time) desc limit 1").fetchone()
+    latest_db_time = str(latest_row[0] or "") if latest_row else ""
     freshness_hours: float | None = None
     if latest_db_time:
         try:
-            latest_dt = datetime.fromisoformat(latest_db_time)
-            if latest_dt.tzinfo is not None and current.tzinfo is None:
-                latest_dt = latest_dt.replace(tzinfo=None)
-            elif latest_dt.tzinfo is None and current.tzinfo is not None:
-                current = current.replace(tzinfo=None)
-            freshness_hours = max(0.0, (current - latest_dt).total_seconds() / 3600)
-        except ValueError:
+            freshness_hours = max(0.0, (current.timestamp() - timestamp_epoch(latest_db_time)) / 3600)
+        except (ValueError, TypeError):
             pass
 
     by_chat: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -808,13 +809,13 @@ def brief_report(
 
     pending_replies: list[tuple[str, dict[str, Any]]] = []
     for chat, rows in direct_ranked_all:
-        latest = sorted(rows, key=lambda row: str(row["time"]))[-1]
+        latest = sorted(rows, key=lambda row: timestamp_epoch(row["time"]) or 0)[-1]
         if not is_self_sender(str(latest["sender"]), self_names) and REQUEST_TERMS.search(str(latest["content"])):
             pending_replies.append((chat, latest))
 
     open_promises: list[tuple[str, dict[str, Any], str]] = []
     for chat, rows in direct_ranked_all:
-        ordered = sorted(rows, key=lambda row: str(row["time"]))
+        ordered = sorted(rows, key=lambda row: timestamp_epoch(row["time"]) or 0)
         promise_indexes = [
             index
             for index, row in enumerate(ordered)
