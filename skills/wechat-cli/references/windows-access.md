@@ -2,13 +2,23 @@
 
 2026-09-22后续：Windows原生CI的Python 3.11/3.12均已通过真实ACL、中文路径、UTF-16材料与虚构SQLCipher数据库导入测试；[执行记录](https://github.com/Rion-Wu-tech/wechat-intelligence-hub/actions/runs/35638032153)。连接目录已去掉残留的POSIX权限判断，验证临时目录先设置ACL。此结果只验证相关读取/导入基础能力，不验证真实微信首次获取或完整日报。
 
+截至2026-09-30，反馈分为三层，不能混称为“Windows已解决”：
+
+| 层次 | 已知证据 | 当前结论 |
+| --- | --- | --- |
+| 社区个人案例 | 有成员报告用第三方WeChatDataAnalysis解密Windows微信4.0数据库，再以自写适配层生成日报；另有成员报告特定4.1.13.12环境实读。 | 说明路线存在，不等于本仓库实现或通用兼容。 |
+| 本仓库 | Reader可验证并导入本人已有材料；`onboard`在Windows明确返回`acquisition_platform_not_supported`。 | 首次取钥未实现，安装与自检不能替代实读。 |
+| 新用户端到端 | 尚无独立Windows机器完成本仓库“首次获取→已知私聊/群聊抽检→Profile→完整日报”的公开验收。 | 不宣称一键接入或成功率。 |
+
+可研究的外部路线包括[WeChatDataAnalysis](https://github.com/LifeArchiveProject/WeChatDataAnalysis)和[wechat-local-analytics](https://github.com/davids1896/wechat-local-analytics)。前者完整产品包含写入与自动化功能，不能直接当作本仓库的只读组件；后者公开了Windows候选扫描与逐库验证实现，但仍需核验进程归属、版本兼容和本仓库材料格式。两者都不是本仓库默认依赖，不因仓库存在就自动下载或执行。
+
 2026-09-22补充：`sqlcipher3 0.6.2`官方PyPI已提供Windows wheels，可先匹配当前解释器的位数和ABI，再做加密往返自检。Reader已兼容Windows常见BOM/UTF-16 JSON；不要把格式错误当成必须重取key。`diagnose --source`可用独立临时配置检验本人已有材料。
 
 另有[社区Windows安装分支](https://github.com/iversonzhang50-gif/wechat-intelligence-hub-windows)，其`docs/WINDOWS-ACCESS.md`明确不捆绑获取工具。安装、自检、材料验证及首次获取是不同验收项；主仓库尚未宣称Windows一键接入。
 
 截至 2026-09-17：社区报告 Windows x64、微信 DLL 文件版本 **4.1.13.12** 上接入成功，但其本地获取适配尚未合入本仓库。便携手册只报告虚构数据库测试，未在第二台机器完成真实获取。不要宣称 Windows 一键接入或任意版本可用。
 
-本仓库已加入 Reader 的真实 Windows ACL 检查和新私有输出权限初始化；开发验证使用模拟 Windows 行为，**还没有 Windows 真机 ACL / 获取 / 完整日报验收**。现有 Bash 安装入口也不能当作原生 Windows 安装器。
+本仓库已加入 Reader 的真实 Windows ACL 检查和新私有输出权限初始化；Windows 原生 CI 已验证虚构材料与数据库的 ACL/导入路径，**仍没有用户本人微信的首次获取与完整日报真机验收**。现有 Bash 安装入口也不能当作原生 Windows 安装器。
 
 ## Codex 的准备与停止条件
 

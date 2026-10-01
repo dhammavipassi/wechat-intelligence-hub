@@ -28,6 +28,8 @@ Codex负责执行检查、准备工具、获取材料、验证和配置。用户
 
 `provider_required`表示由Codex准备工具；`provider_review_required`表示来源或哈希尚未核验；`authorization_required`表示等待用户确认；`existing_configuration_requires_review`表示先排障，禁止覆盖。顶层 `ok:true`只表示命令完成；`state:ready`和`live_database_read_ok:true`表示配置可读，但仍要单独检查恢复状态。异常结果中没有key或原始聊天。
 
+若失败，先用 `access.sh diagnose --support-summary` 读取白名单结果：`last_attempt_state` 区分启动前检查、provider无法启动和运行后失败，`last_attempt_diagnostics.phase` 标识停在何处。`shadow_policy_blocked` 是临时副本被系统策略拒绝的候选信号；`official_wechat_stop_failed` 是原微信未在限定时间内退出或仍有同名进程的候选信号。副本准备的 `official_wechat_scan_failed`、`official_wechat_process_unverified`、`other_wechat_install_running` 表示本机微信进程无法安全判定；PBKDF 兜底的 `pbkdf_process_*` 表示进程核验或正常退出失败，`pbkdf_shadow_*` 表示旧副本不可信。这些情况均应停止并核对恢复状态，不关闭系统保护、不强制杀进程、不循环重试。信号不等于拿到key，也不能单独判定所有微信版本不兼容。Reader 修订号 `2026-09-30.2` 起在启动provider前拦截其他用户及其他安装位置的同名微信进程；`.3` 增加本轮诊断，旧安装先保留个人材料并更新接入助手。
+
 ## 先检查，再配置
 
 运行本Skill的 `reader.sh self-test`，再运行 `reader.sh access-plan --pretty`。

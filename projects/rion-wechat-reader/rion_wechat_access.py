@@ -23,7 +23,7 @@ import time
 
 import rion_wechat_reader as reader
 
-ACCESS_REVISION = "2026-09-22.2"
+ACCESS_REVISION = "2026-09-30.3"
 
 # Fixed messages only: exceptions may contain private paths or provider material.
 MATERIAL_ERRORS = {
@@ -50,6 +50,30 @@ def material_diagnostic(exc: reader.ReaderError) -> dict:
     return {"code": code, "message": MATERIAL_ERRORS.get(code, "材料校验失败，检查本机输入，不上传原始文件。")}
 
 
+def support_next_step(report: dict) -> str:
+    """Return a stable, non-sensitive action code for support and onboarding."""
+    if report.get("recovery_review_required") is True:
+        return "review_wechat_recovery"
+    state = report.get("state")
+    if state == "ready" and report.get("live_database_read_ok") is True:
+        return "use_existing_reader"
+    if state == "ready_to_configure":
+        return "verify_then_configure"
+    if state == "dependency_required":
+        return "repair_runtime_dependency"
+    if state in {"account_selection_required", "needs_database_location", "database_missing"}:
+        return "select_account_or_database"
+    if state in {"filesystem_access_required", "unsafe_key_permissions"}:
+        return "review_local_permissions"
+    if state in {"partial", "scan_incomplete"}:
+        return "review_coverage"
+    if state in {"verification_failed", "invalid_access_material", "access_material_requires_review"}:
+        return "review_existing_material"
+    if state in {"needs_access", "acquisition_platform_not_supported"}:
+        return "review_access_options"
+    return "manual_review"
+
+
 def support_summary(report: dict) -> dict:
     """Public support payload: independently select fields, never copy raw data."""
     states = {"ready", "ready_to_configure", "needs_access", "dependency_required", "partial",
@@ -58,10 +82,14 @@ def support_summary(report: dict) -> dict:
               "access_material_requires_review", "acquisition_platform_not_supported",
               "existing_configuration_requires_review", "invalid_access_material", "database_missing",
               "filesystem_access_required"}
+    current_state = report.get("state")
+    if current_state == "ready" and report.get("live_database_read_ok") is not True:
+        current_state = "unknown"
     result = {"schema_version": 1, "access_helper_revision": ACCESS_REVISION,
-              "state": report.get("state") if report.get("state") in states else "unknown",
+              "state": current_state if current_state in states else "unknown",
               "live_database_read_ok": report.get("live_database_read_ok") is True,
               "recovery_review_required": report.get("recovery_review_required") is True,
+              "next_step_code": support_next_step(report),
               "network_called": False, "configuration_changed": False}
     environment = report.get("environment", {})
     result["environment"] = {}
@@ -85,6 +113,8 @@ def support_summary(report: dict) -> dict:
             "state": preview.get("state") if preview.get("state") in states else "unknown",
             "error_code": code if code in MATERIAL_ERRORS else "none_or_unknown"}
     result["last_attempt_diagnostics"] = safe_diagnostics(report.get("last_attempt", {}).get("diagnostics", {}))
+    attempt_state = report.get("last_attempt", {}).get("state")
+    result["last_attempt_state"] = attempt_state if attempt_state in WORKER_STATES else "none_or_unknown"
     return result
 
 
@@ -217,6 +247,17 @@ PROVIDER_MARKERS = (
     ("No module named 'lldb'", "debugger_unavailable"),
     ("launch failed", "target_launch_failed"),
     ("target_launch_failed", "target_launch_failed"),
+    ("shadow_policy_blocked", "shadow_policy_blocked"),
+    ("official_wechat_stop_failed", "official_wechat_stop_failed"),
+    ("official_wechat_scan_failed", "official_wechat_scan_failed"),
+    ("official_wechat_process_unverified", "official_wechat_process_unverified"),
+    ("other_wechat_install_running", "other_wechat_install_running"),
+    ("pbkdf_process_scan_failed", "pbkdf_process_scan_failed"),
+    ("pbkdf_process_unverified", "pbkdf_process_unverified"),
+    ("pbkdf_foreign_wechat_process", "pbkdf_foreign_wechat_process"),
+    ("pbkdf_process_stop_failed", "pbkdf_process_stop_failed"),
+    ("pbkdf_shadow_path_invalid", "pbkdf_shadow_path_invalid"),
+    ("pbkdf_shadow_signature_unverified", "pbkdf_shadow_signature_unverified"),
     ("target_identity_mismatch", "target_identity_mismatch"),
     ("target_identity_unverified", "target_identity_unverified"),
     ("target_entry_timeout", "target_entry_timeout"),
@@ -235,9 +276,10 @@ PREFLIGHT_ERRORS = {
     "database_not_regular_file", "database_preflight_limit_exceeded", "database_preflight_failed",
     "symlink_path_rejected", "debugger_unavailable", "provider_dependency_check_failed",
     "provider_account_root_required",
-    "debugger_api_incompatible",
+    "debugger_api_incompatible", "worker_preflight_failed",
+    "other_user_wechat_running", "other_wechat_install_running",
 }
-WORKER_STATES = PREFLIGHT_ERRORS | {"provider_finished", "provider_failed", "provider_timeout_cleanup_required"}
+WORKER_STATES = PREFLIGHT_ERRORS | {"provider_finished", "provider_failed", "provider_start_failed", "provider_timeout_cleanup_required"}
 SIGNAL_ACTIONS = {
     "account_salt_mismatch": "核对正在登录的账号与所选db_storage是否一致；不要把别的账号材料混入本账号。",
     "no_derivation_observed": "未观察到目标派生调用；先核对登录状态、目标进程身份与当前版本兼容性，不能据此断言key不存在。",
@@ -250,6 +292,17 @@ SIGNAL_ACTIONS = {
     "original_reopen_failed": "工具报告原微信重开失败；请手动打开官方微信并确认登录，不自动清除恢复锁。",
     "original_reopen_requested": "工具仅报告已请求重开原微信，不代表已经登录或恢复读取；请检查后再处理恢复锁。",
     "shadow_prepare_failed": "副本准备失败；检查官方微信是否已恢复，不自动关闭SIP或重签原应用。",
+    "shadow_policy_blocked": "系统启动策略拒绝临时副本；本次不应退出官方微信，也不应关闭系统保护或循环重试。",
+    "official_wechat_stop_failed": "原微信未在限定时间内退出，或仍有同名进程；先核对官方客户端与残留进程，不强制杀进程、不重复获取。",
+    "official_wechat_scan_failed": "副本准备前无法可靠列出微信进程；本轮已停止，先核对进程查询权限，不靠重复取key解决。",
+    "official_wechat_process_unverified": "副本准备前无法核实同名进程属于官方微信；本轮已停止，先人工核对该实例。",
+    "other_wechat_install_running": "发现另一份微信安装实例；本轮不退出它，先确认各实例的归属和登录状态。",
+    "pbkdf_process_scan_failed": "兜底获取无法可靠列出微信进程；停止操作，确认本机进程查询权限后再评估。",
+    "pbkdf_process_unverified": "兜底获取无法核实某个微信进程的位置；未向进程发送退出信号，先确认是否有其他实例。",
+    "pbkdf_foreign_wechat_process": "检测到不属于官方客户端或本次副本的微信进程；未向进程发送退出信号，先人工核对实例。",
+    "pbkdf_process_stop_failed": "已核实的微信进程未正常退出或退出信号失败；不要强制杀进程或自动重试，先检查官方微信是否恢复。",
+    "pbkdf_shadow_path_invalid": "旧临时副本的位置、目录类型或可执行文件不可靠；本轮不复用它，先由人工检查受管目录，不修改原微信。",
+    "pbkdf_shadow_signature_unverified": "旧临时副本的签名未通过检查；本轮不启动它，先核对来源，不关闭系统保护。",
     "debugger_unavailable": "核对Command Line Tools和实际Apple Python的LLDB导入能力。",
     "partial_key_coverage": "可能只得到部分材料；显式connect只读验证覆盖范围，不直接重新获取或宣称全量可读。",
 }
@@ -272,7 +325,7 @@ def safe_diagnostics(value: object) -> dict:
     if not isinstance(value, dict):
         return {}
     result = {}
-    if value.get("phase") in {"database_preflight", "debugger_preflight", "provider_exit", "provider_timeout"}:
+    if value.get("phase") in {"worker_preflight", "database_preflight", "debugger_preflight", "provider_start", "provider_exit", "provider_timeout"}:
         result["phase"] = value["phase"]
     for name in ("provider_started", "timed_out"):
         if type(value.get(name)) is bool:
@@ -520,35 +573,48 @@ def worker(args: argparse.Namespace) -> int:
     expected_parent = home / ".config" / "rion-wechat-reader" / "access-runs"
     if run_dir.parent != expected_parent or run_dir.stat().st_uid != args.uid or stat.S_IMODE(run_dir.stat().st_mode) != 0o700:
         raise AccessError("invalid_worker_directory")
-    if provider_digest(args.provider) != args.sha256.lower():
-        raise AccessError("provider_digest_mismatch")
-    source = private_path(home / ".config" / "wxcli" / "config.json")
-    if source.exists():
-        raise AccessError("provider_config_exists_use_connect")
-    account_root, root = provider_roots(args.database_root)
-    # The reviewed provider can quit WeChat globally. Refuse shared-user runs.
-    processes = subprocess.run(["/bin/ps", "-axo", "uid=,comm="], capture_output=True, text=True, check=True).stdout
-    for line in processes.splitlines():
-        fields = line.strip().split(None, 1)
-        if len(fields) == 2 and Path(fields[1]).name == "WeChat" and int(fields[0]) != args.uid:
-            raise AccessError("other_user_wechat_running")
     env = {
         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "USER": owner.pw_name,
         "WXKEY_ORIG_HOME": str(home), "WXKEY_ORIG_USER": owner.pw_name,
         "WXKEY_NO_ELEVATE": "1", "WXKEY_ELEVATED": "1",
         "WXKEY_SETUP_TIMEOUT": "180s", "WXKEY_PBKDF_PROBE_TIMEOUT": "180s",
     }
-    diagnostics = {"phase": "database_preflight", "provider_started": False}
+    diagnostics = {"phase": "worker_preflight", "provider_started": False}
     try:
+        if provider_digest(args.provider) != args.sha256.lower():
+            raise AccessError("provider_digest_mismatch")
+        source = private_path(home / ".config" / "wxcli" / "config.json")
+        if source.exists():
+            raise AccessError("provider_config_exists_use_connect")
+        account_root, root = provider_roots(args.database_root)
+        # The reviewed provider can quit WeChat globally. Refuse shared-user runs.
+        processes = subprocess.run(["/bin/ps", "-axo", "uid=,comm="], capture_output=True, text=True, check=True).stdout
+        official_wechat = "/Applications/WeChat.app/Contents/MacOS/WeChat"
+        for line in processes.splitlines():
+            fields = line.strip().split(None, 1)
+            if len(fields) != 2 or Path(fields[1]).name != "WeChat":
+                continue
+            if int(fields[0]) != args.uid:
+                raise AccessError("other_user_wechat_running")
+            if fields[1] != official_wechat:
+                raise AccessError("other_wechat_install_running")
+        diagnostics["phase"] = "database_preflight"
         diagnostics["readable_database_count"] = preflight_database_access(root, getattr(args, "max_files", 500))
         diagnostics["phase"] = "debugger_preflight"
         preflight_debugger()
     except AccessError as exc:
-        state = str(exc)
+        state = str(exc) if str(exc) in PREFLIGHT_ERRORS else "worker_preflight_failed"
+    except (OSError, ValueError, subprocess.SubprocessError):
+        state = "worker_preflight_failed"
     else:
-        diagnostics["provider_started"] = True
-        state = bounded_provider([str(args.provider), "bootstrap", "--root", str(account_root)], env, args.timeout,
-                                 diagnostics=diagnostics)
+        diagnostics["phase"] = "provider_start"
+        try:
+            diagnostics["provider_started"] = True
+            state = bounded_provider([str(args.provider), "bootstrap", "--root", str(account_root)], env, args.timeout,
+                                     diagnostics=diagnostics)
+        except (OSError, subprocess.SubprocessError):
+            diagnostics["provider_started"] = False
+            state = "provider_start_failed"
     # Exclusive creation avoids replacing any existing recovery result.
     fd = os.open(str(run_dir / "worker-result.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:

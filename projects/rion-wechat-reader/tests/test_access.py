@@ -15,6 +15,38 @@ import rion_wechat_access as access
 
 
 class AccessOnboardingTests(unittest.TestCase):
+    def test_support_next_step_prioritizes_recovery_and_current_readability(self):
+        cases = (
+            ({"state": "ready", "live_database_read_ok": True}, "use_existing_reader"),
+            ({"state": "ready", "live_database_read_ok": True, "recovery_review_required": True}, "review_wechat_recovery"),
+            ({"state": "ready_to_configure"}, "verify_then_configure"),
+            ({"state": "dependency_required"}, "repair_runtime_dependency"),
+            ({"state": "needs_access"}, "review_access_options"),
+            ({"state": "verification_failed"}, "review_existing_material"),
+            ({"state": "needs_access", "last_attempt": {"state": "provider_start_failed"}}, "review_access_options"),
+            ({"state": "needs_access", "last_attempt": {"state": "worker_preflight_failed"}}, "review_access_options"),
+            ({"state": "needs_access", "last_attempt": {"state": "provider_failed", "diagnostics": {"signals": ["shadow_policy_blocked"]}}}, "review_access_options"),
+            ({"state": "ready", "live_database_read_ok": True, "last_attempt": {"state": "provider_start_failed"}}, "use_existing_reader"),
+            ({"state": "dependency_required", "last_attempt": {"state": "provider_start_failed"}}, "repair_runtime_dependency"),
+            ({"state": "unexpected"}, "manual_review"),
+        )
+        for report, expected in cases:
+            with self.subTest(report=report):
+                self.assertEqual(access.support_next_step(report), expected)
+                self.assertEqual(access.support_summary(report)["next_step_code"], expected)
+
+    def test_support_summary_only_exposes_allowlisted_attempt_state(self):
+        report = {"state": "needs_access", "last_attempt": {
+            "state": "PRIVATE-KEY-DO-NOT-LEAK", "diagnostics": {"phase": "provider_start", "secret": "PRIVATE-KEY-DO-NOT-LEAK"}}}
+        summary = access.support_summary(report)
+        self.assertEqual(summary["last_attempt_state"], "none_or_unknown")
+        self.assertNotIn("PRIVATE-KEY-DO-NOT-LEAK", json.dumps(summary))
+
+    def test_support_summary_ready_requires_live_database_read(self):
+        summary = access.support_summary({"state": "ready", "live_database_read_ok": False})
+        self.assertEqual(summary["state"], "unknown")
+        self.assertEqual(summary["next_step_code"], "manual_review")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name).resolve()
@@ -97,6 +129,38 @@ class AccessOnboardingTests(unittest.TestCase):
         self.assertEqual(diagnostics['exit_code'], 3)
         self.assertNotIn('PRIVATE MATERIAL', json.dumps(diagnostics))
 
+    def test_shadow_policy_signal_is_fixed_and_redacted(self):
+        diagnostics = {}
+        access.provider_signals(b"private/path: shadow_policy_blocked key=SECRET", diagnostics)
+        self.assertEqual(access.safe_diagnostics(diagnostics)["signals"], ["shadow_policy_blocked"])
+        self.assertNotIn("SECRET", json.dumps(access.safe_diagnostics(diagnostics)))
+
+    def test_slow_wechat_exit_signal_is_fixed_and_redacted(self):
+        diagnostics = {}
+        access.provider_signals(b"PRIVATE /tmp/path official_wechat_stop_failed", diagnostics)
+        self.assertEqual(access.safe_diagnostics(diagnostics)["signals"], ["official_wechat_stop_failed"])
+        self.assertNotIn("PRIVATE", json.dumps(access.safe_diagnostics(diagnostics)))
+
+    def test_pbkdf_process_signals_are_actionable_without_paths(self):
+        diagnostics = {}
+        access.provider_signals(b"/private/account pbkdf_foreign_wechat_process key=SECRET", diagnostics)
+        self.assertEqual(access.safe_diagnostics(diagnostics)["signals"], ["pbkdf_foreign_wechat_process"])
+        self.assertTrue(any("未向进程发送退出信号" in action for action in access.diagnostic_actions(diagnostics)))
+        self.assertNotIn("SECRET", json.dumps(access.safe_diagnostics(diagnostics)))
+
+    def test_pbkdf_shadow_signal_does_not_expose_signature_output(self):
+        diagnostics = {}
+        access.provider_signals(b"private codesign detail pbkdf_shadow_signature_unverified", diagnostics)
+        self.assertEqual(access.safe_diagnostics(diagnostics)["signals"], ["pbkdf_shadow_signature_unverified"])
+        self.assertNotIn("codesign detail", json.dumps(access.safe_diagnostics(diagnostics)))
+
+    def test_shadow_preflight_signals_are_fixed_and_redacted(self):
+        diagnostics = {}
+        access.provider_signals(b"private/path other_wechat_install_running key=SECRET", diagnostics)
+        self.assertEqual(access.safe_diagnostics(diagnostics)["signals"], ["other_wechat_install_running"])
+        self.assertTrue(any("不退出它" in action for action in access.diagnostic_actions(diagnostics)))
+        self.assertNotIn("SECRET", json.dumps(access.safe_diagnostics(diagnostics)))
+
     @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
     def test_provider_timeout_is_bounded(self):
         started = time.monotonic()
@@ -178,6 +242,57 @@ class AccessOnboardingTests(unittest.TestCase):
         result = json.loads((run_dir / 'worker-result.json').read_text())
         self.assertFalse(result['diagnostics']['provider_started'])
         self.assertNotIn(str(self.root), json.dumps(result))
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX worker')
+    def test_worker_rejects_other_wechat_processes_before_provider(self):
+        import pwd
+        from types import SimpleNamespace
+        other_user = f'{os.getuid() + 1} /Applications/WeChat.app/Contents/MacOS/WeChat'
+        other_install = f'{os.getuid()} /tmp/Other.app/Contents/MacOS/WeChat'
+        for label, process, expected in (
+            ('user', other_user, 'other_user_wechat_running'),
+            ('install', other_install, 'other_wechat_install_running'),
+        ):
+            with self.subTest(label=label):
+                run_dir = self.root / '.config/rion-wechat-reader/access-runs' / ('run-' + label)
+                run_dir.mkdir(mode=0o700, parents=True)
+                args = self.args()
+                args.run_dir, args.uid = run_dir, os.getuid()
+                with mock.patch.object(access.os, 'geteuid', return_value=0), \
+                     mock.patch.object(pwd, 'getpwuid', return_value=SimpleNamespace(pw_dir=str(self.root), pw_name='testuser', pw_gid=os.getgid())), \
+                     mock.patch.object(access.subprocess, 'run', return_value=SimpleNamespace(stdout=process)), \
+                     mock.patch.object(access.os, 'chown'), \
+                     mock.patch.object(access, 'bounded_provider') as invoke:
+                    self.assertEqual(access.worker(args), 1)
+                invoke.assert_not_called()
+                result = json.loads((run_dir / 'worker-result.json').read_text())
+                self.assertEqual(result['state'], expected)
+                self.assertFalse(result['diagnostics']['provider_started'])
+                self.assertNotIn('/tmp/Other.app', json.dumps(result))
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX worker')
+    def test_worker_preflight_and_spawn_failures_leave_fixed_results(self):
+        import pwd
+        from types import SimpleNamespace
+        for failure, expected in (("preflight", "worker_preflight_failed"),
+                                  ("spawn", "provider_start_failed")):
+            with self.subTest(failure=failure):
+                run_dir = self.root / '.config/rion-wechat-reader/access-runs' / ('run-' + failure)
+                run_dir.mkdir(mode=0o700, parents=True)
+                args = self.args()
+                args.run_dir, args.uid = run_dir, os.getuid()
+                (self.db / 'sample.db').write_bytes(b'fictional-header')
+                with mock.patch.object(access.os, 'geteuid', return_value=0), \
+                     mock.patch.object(pwd, 'getpwuid', return_value=SimpleNamespace(pw_dir=str(self.root), pw_name='testuser', pw_gid=os.getgid())), \
+                     mock.patch.object(access.os, 'chown'), \
+                     mock.patch.object(access.subprocess, 'run', side_effect=OSError('PRIVATE PATH') if failure == 'preflight' else None), \
+                     mock.patch.object(access, 'preflight_debugger'), \
+                     mock.patch.object(access, 'bounded_provider', side_effect=OSError('PRIVATE PATH') if failure == 'spawn' else None):
+                    self.assertEqual(access.worker(args), 1)
+                result = json.loads((run_dir / 'worker-result.json').read_text())
+                self.assertEqual(result['state'], expected)
+                self.assertNotIn('PRIVATE PATH', json.dumps(result))
+                self.assertFalse(result['diagnostics']['provider_started'])
 
     def test_encrypted_connect_publishes_only_verified_generation(self):
         import test_reader as fixtures

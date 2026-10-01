@@ -141,7 +141,7 @@ class MaterialCompatibilityTests(unittest.TestCase):
     def test_diagnose_summary_omits_full_report(self):
         args = SimpleNamespace(config=self.root / "config", database_root=None,
                                max_files=50, source=None, support_summary=True, jev_request=False)
-        with mock.patch.object(access, "access_status", return_value={"state": "ready", "private": self.key}):
+        with mock.patch.object(access, "access_status", return_value={"state": "ready", "live_database_read_ok": True, "private": self.key}):
             result = access.diagnose(args)
         self.assertNotIn("private", result)
         self.assertEqual(result["state"], "ready")
