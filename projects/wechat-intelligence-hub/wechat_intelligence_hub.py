@@ -6216,15 +6216,46 @@ def read_reader_info(wechat_cli: Path) -> dict[str, str]:
     }
 
 
+def reader_config_identity() -> str:
+    config_path = Path(os.environ.get("RION_WECHAT_READER_CONFIG") or "~/.config/rion-wechat-reader/config.json").expanduser()
+    try:
+        config_bytes = config_path.read_bytes()
+    except OSError:
+        config_bytes = b""
+    try:
+        config_data = json.loads(config_bytes)
+    except (ValueError, UnicodeDecodeError):
+        config_data = {}
+    if not isinstance(config_data, dict):
+        config_data = {}
+    keys_path = Path(
+        os.environ.get("RION_WECHAT_READER_KEYS")
+        or config_data.get("keys_file")
+        or "~/.config/rion-wechat-reader/keys.json"
+    ).expanduser()
+    try:
+        keys_stat = keys_path.stat()
+        keys_state = f"{keys_stat.st_mtime_ns}:{keys_stat.st_size}"
+    except OSError:
+        keys_state = "missing"
+    material = b"\0".join(
+        (str(config_path.resolve()).encode(), config_bytes, str(keys_path.resolve()).encode(), keys_state.encode())
+    )
+    return hashlib.sha256(material).hexdigest()
+
+
 def compatibility_signature(report: dict[str, Any]) -> tuple[str, ...]:
     wechat = report.get("wechat") if isinstance(report.get("wechat"), dict) else {}
     reader = report.get("reader") if isinstance(report.get("reader"), dict) else {}
     return (
+        str(wechat.get("path") or ""),
         str(wechat.get("version") or ""),
         str(wechat.get("build") or ""),
         str(wechat.get("bundle_version") or ""),
+        str(reader.get("path") or ""),
         str(reader.get("version") or ""),
         str(reader.get("sha256") or ""),
+        str(reader.get("config_identity") or ""),
     )
 
 
@@ -6287,6 +6318,7 @@ def run_compatibility_check(
         }
         errors.append("reader-version: " + sanitized_compat_error(exc))
 
+    reader_info["config_identity"] = reader_config_identity()
     identity = {"wechat": wechat_info, "reader": reader_info}
     if not force and compatibility_cache_is_fresh(previous, identity, max_age_hours):
         cached = dict(previous or {})

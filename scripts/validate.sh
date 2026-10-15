@@ -4,6 +4,13 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 validator="${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py"
 
+move_temp_to_trash() {
+  local source="$1"
+  [ -e "$source" ] || return 0
+  mkdir -p "$HOME/.Trash" >/dev/null 2>&1 || return 1
+  mv "$source" "$HOME/.Trash/$(basename "$source").$$" >/dev/null 2>&1
+}
+
 if [ -f "$validator" ]; then
   for skill_dir in "$repo_root"/skills/*; do
     python3 "$validator" "$skill_dir"
@@ -20,7 +27,7 @@ fi
 )
 
 hub_release_test="$(mktemp -d)"
-trap 'rm -rf -- "$hub_release_test"' EXIT
+trap 'move_temp_to_trash "$hub_release_test"' EXIT
 python3 -m unittest discover -s "$repo_root/providers/wxkey/tests" -v
 python3 "$repo_root/projects/wechat-intelligence-hub/scripts/build_release.py" \
   --out "$hub_release_test/wechat-intelligence-hub"
@@ -33,7 +40,7 @@ install -m 0755 "$repo_root/projects/rion-wechat-reader/rion_wechat_reader.py" \
   cd "$hub_release_test/wechat-intelligence-hub"
   python3 -m unittest discover -s tests -v
 )
-rm -rf -- "$hub_release_test"
+move_temp_to_trash "$hub_release_test"
 trap - EXIT
 
 (
@@ -44,7 +51,7 @@ trap - EXIT
 
 reader_install_test="$(mktemp -d)"
 reader_install_test="$(cd "$reader_install_test" && pwd -P)"
-trap 'rm -rf "$reader_install_test"' EXIT
+trap 'move_temp_to_trash "$reader_install_test"' EXIT
 "$repo_root/projects/rion-wechat-reader/install.sh" --prefix "$reader_install_test"
 "$reader_install_test/bin/rion-wechat-cli" version >/dev/null
 "$reader_install_test/bin/rion-wechat-cli" self-test >/dev/null
@@ -55,7 +62,7 @@ HOME="$reader_install_test/home" "$reader_install_test/bin/rion-wechat-cli" doct
 "$reader_install_test/bin/rion-wechat-access" finish-recovery --help >/dev/null
 HOME="$reader_install_test/home" "$reader_install_test/bin/rion-wechat-access" status >/dev/null
 test -f "$reader_install_test/share/rion-wechat-cli/rion_wechat_reader.py"
-rm -rf "$reader_install_test"
+move_temp_to_trash "$reader_install_test"
 trap - EXIT
 
 python3 -m py_compile "$repo_root/projects/rion-wechat-reader/rion_wechat_reader.py"
@@ -92,7 +99,7 @@ if rg -n \
 fi
 
 codex_skill_install_test="$(mktemp -d)"
-trap 'rm -rf -- "$codex_skill_install_test"' EXIT
+trap 'move_temp_to_trash "$codex_skill_install_test"' EXIT
 CODEX_HOME="$codex_skill_install_test" \
   "$repo_root/scripts/install.sh"
 test -f "$codex_skill_install_test/skills/wechat-cli/SKILL.md"
@@ -107,20 +114,20 @@ PATH="/usr/bin:/bin" CODEX_HOME="$codex_skill_install_test" \
   "$codex_skill_install_test/skills/wechat-cli/scripts/access.sh" --help >/dev/null
 HOME="$codex_skill_install_test/home" PATH="/usr/bin:/bin" CODEX_HOME="$codex_skill_install_test" \
   "$codex_skill_install_test/skills/wechat-intelligence-hub/scripts/hub.sh" --help >/dev/null
-rm -rf -- "$codex_skill_install_test"
+move_temp_to_trash "$codex_skill_install_test"
 trap - EXIT
 
 if [ -n "${RION_WECHAT_SQLCIPHER_WHEEL:-}" ]; then
   "$repo_root/projects/rion-wechat-reader/scripts/validate_sqlcipher.sh"
 
   codex_install_test="$(mktemp -d)"
-  trap 'rm -r -- "$codex_install_test"' EXIT
+  trap 'move_temp_to_trash "$codex_install_test"' EXIT
   CODEX_HOME="$codex_install_test" \
     RION_WECHAT_SQLCIPHER_WHEEL="$RION_WECHAT_SQLCIPHER_WHEEL" \
     "$repo_root/scripts/install.sh" --with-sqlcipher wechat-cli
   PATH="/usr/bin:/bin" CODEX_HOME="$codex_install_test" \
     "$codex_install_test/skills/wechat-cli/scripts/reader.sh" self-test --require-sqlcipher >/dev/null
-  rm -r -- "$codex_install_test"
+  move_temp_to_trash "$codex_install_test"
   trap - EXIT
 fi
 

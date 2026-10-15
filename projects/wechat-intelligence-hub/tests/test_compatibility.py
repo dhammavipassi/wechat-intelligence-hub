@@ -120,6 +120,29 @@ class WeChatCompatibilityTests(unittest.TestCase):
         self.assertNotIn("wxid_private-secret", json.dumps(report, ensure_ascii=False))
         self.assertIn("db-search", report["next_action"])
 
+    def test_reader_account_config_change_invalidates_ready_cache(self) -> None:
+        config_a = self.root / "reader-account-a.json"
+        config_b = self.root / "reader-account-b.json"
+        config_a.write_text('{"session_db":"/synthetic/a"}', encoding="utf-8")
+        config_b.write_text('{"session_db":"/synthetic/b"}', encoding="utf-8")
+
+        with mock.patch.dict("os.environ", {"RION_WECHAT_READER_CONFIG": str(config_a)}):
+            with mock.patch.object(radar, "run_json_command", side_effect=self.successful_command) as run:
+                first = radar.run_compatibility_check(str(self.cli), wechat_app_value=str(self.app), state_dir_value=str(self.state_dir))
+                second = radar.run_compatibility_check(str(self.cli), wechat_app_value=str(self.app), state_dir_value=str(self.state_dir))
+                self.assertFalse(first["cache_reused"])
+                self.assertTrue(second["cache_reused"])
+                self.assertEqual(sum("status" in call.args[0] for call in run.call_args_list), 1)
+
+        with mock.patch.dict("os.environ", {"RION_WECHAT_READER_CONFIG": str(config_b)}):
+            with mock.patch.object(radar, "run_json_command", side_effect=self.successful_command) as run:
+                third = radar.run_compatibility_check(str(self.cli), wechat_app_value=str(self.app), state_dir_value=str(self.state_dir))
+
+        self.assertFalse(third["cache_reused"])
+        self.assertTrue(third["version_changed"])
+        self.assertEqual(sum("status" in call.args[0] for call in run.call_args_list), 1)
+        self.assertNotIn("/synthetic/", (self.state_dir / "latest.json").read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()
