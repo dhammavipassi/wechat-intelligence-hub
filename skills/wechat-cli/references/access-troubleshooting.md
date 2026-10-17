@@ -29,6 +29,7 @@ Windows 的平台入口、DLL候选转换、SQLCipher、ACL与文本验收见 [W
 | `ready` | 抽检群聊、私聊、标签和时间范围，直接使用 | 重取key |
 | `existing_provider_material_available` | 仅表示已知wxcli材料文件存在。确认是本账号材料后，用`onboard --source`显式验证 | 当成已验证key，或无视它再获取 |
 | `dependency_required` | 检查实际CLI解释器的SQLCipher/zstandard；使用安装脚本提供的独立环境 | 以为系统Python装了包就一定可用 |
+| `zstandard_driver_required` | 引擎解释器缺zstandard（WCDB压缩消息）。`reader.sh`已自行解析合格解释器；被消费方venv的PATH覆盖时，显式设`RION_WECHAT_READER_PYTHON` | 把消费方管道venv当作Reader运行时，或只看`reader history`的rc码不看引擎错误JSON |
 | `account_selection_required` | 请用户确认唯一目标账号 | 根据目录修改时间猜账号 |
 | `database_read_permission_denied` | 核对实际提权Python的文件访问权限。root不自动豁免TCC | 反复重启微信、全盘搜索或关闭SIP |
 | `debugger_unavailable` | 修复Apple Python与LLDB/Command Line Tools。助手在provider前验证导入 | 认为Reader自检通过就代表调试器也可用 |

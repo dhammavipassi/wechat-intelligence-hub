@@ -3,6 +3,10 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 validator="${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py"
+# 校验脚本的解释器必须可指定：nh3 等前置装在 Hub 的 .venv 里，盲取 PATH 上的 python3
+# 会让 test_report_security 整组报错退出（2026-10-17 实证）。契约同 reader.sh：
+# 由调用方声明解释器，脚本不猜。
+python_bin="${PYTHON_BIN:-python3}"
 
 move_temp_to_trash() {
   local source="$1"
@@ -13,7 +17,7 @@ move_temp_to_trash() {
 
 if [ -f "$validator" ]; then
   for skill_dir in "$repo_root"/skills/*; do
-    python3 "$validator" "$skill_dir"
+    "$python_bin" "$validator" "$skill_dir"
   done
 else
   echo "Skill validator not found; skipping metadata validation."
@@ -21,15 +25,15 @@ fi
 
 (
   cd "$repo_root/projects/wechat-intelligence-hub"
-  python3 wechat_intelligence_hub.py --help >/dev/null
-  python3 wechat_deal_radar.py --help >/dev/null
-  python3 -m unittest discover -s tests -v
+  "$python_bin" wechat_intelligence_hub.py --help >/dev/null
+  "$python_bin" wechat_deal_radar.py --help >/dev/null
+  "$python_bin" -m unittest discover -s tests -v
 )
 
 hub_release_test="$(mktemp -d)"
 trap 'move_temp_to_trash "$hub_release_test"' EXIT
-python3 -m unittest discover -s "$repo_root/providers/wxkey/tests" -v
-python3 "$repo_root/projects/wechat-intelligence-hub/scripts/build_release.py" \
+"$python_bin" -m unittest discover -s "$repo_root/providers/wxkey/tests" -v
+"$python_bin" "$repo_root/projects/wechat-intelligence-hub/scripts/build_release.py" \
   --out "$hub_release_test/wechat-intelligence-hub"
 test -f "$hub_release_test/wechat-intelligence-hub/release-manifest.json"
 # The encrypted integration fixture expects the separately shipped Reader sibling.
@@ -38,15 +42,15 @@ install -m 0755 "$repo_root/projects/rion-wechat-reader/rion_wechat_reader.py" \
   "$hub_release_test/rion-wechat-reader/rion_wechat_reader.py"
 (
   cd "$hub_release_test/wechat-intelligence-hub"
-  python3 -m unittest discover -s tests -v
+  "$python_bin" -m unittest discover -s tests -v
 )
 move_temp_to_trash "$hub_release_test"
 trap - EXIT
 
 (
   cd "$repo_root/projects/rion-wechat-reader"
-  python3 -m unittest discover -s tests -v
-  python3 scripts/capability_gap.py --strict
+  "$python_bin" -m unittest discover -s tests -v
+  "$python_bin" scripts/capability_gap.py --strict
 )
 
 reader_install_test="$(mktemp -d)"
@@ -65,11 +69,11 @@ test -f "$reader_install_test/share/rion-wechat-cli/rion_wechat_reader.py"
 move_temp_to_trash "$reader_install_test"
 trap - EXIT
 
-python3 -m py_compile "$repo_root/projects/rion-wechat-reader/rion_wechat_reader.py"
-python3 -m py_compile "$repo_root/projects/rion-wechat-reader/rion_wechat_access.py"
+"$python_bin" -m py_compile "$repo_root/projects/rion-wechat-reader/rion_wechat_reader.py"
+"$python_bin" -m py_compile "$repo_root/projects/rion-wechat-reader/rion_wechat_access.py"
 
-python3 -m py_compile "$repo_root/projects/rion-wechat-reader/scripts/capability_gap.py"
-python3 -m py_compile "$repo_root/projects/rion-wechat-reader/scripts/live_parity.py"
+"$python_bin" -m py_compile "$repo_root/projects/rion-wechat-reader/scripts/capability_gap.py"
+"$python_bin" -m py_compile "$repo_root/projects/rion-wechat-reader/scripts/live_parity.py"
 
 bash -n \
   "$repo_root/projects/rion-wechat-reader/install.sh" \
