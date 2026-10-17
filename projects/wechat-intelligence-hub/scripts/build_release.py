@@ -22,6 +22,7 @@ ROOT_FILES = {
     "report_security.py",
     "requirements-html.txt",
     "message_time.py",
+    "message_identity.py",
     "wechat_intelligence_hub.py",
     "wechat_deal_radar.py",
 }

@@ -7,6 +7,7 @@ import sqlite3
 from typing import Any, Iterable
 
 from message_time import register_time_sql, timestamp_epoch, validate_window
+from message_identity import conversation_key
 
 
 COMMERCIAL_TERMS = re.compile(
@@ -68,6 +69,84 @@ def normalize_since(value: str | None) -> str:
 def is_self_sender(sender: str, self_names: Iterable[str]) -> bool:
     folded = sender.strip().casefold()
     return bool(folded) and any(folded == name.strip().casefold() for name in self_names if name.strip())
+
+
+def promise_projects(content: str) -> set[str]:
+    """Only explicit project references; unknown references are not guessed."""
+    refs = set(re.findall(r"([甲乙丙丁戊己庚辛壬癸]|[A-Za-z][A-Za-z0-9_-]*)\s*(?:项目|品牌)", content))
+    refs.update(re.findall(r"(?:项目|品牌)\s*([甲乙丙丁戊己庚辛壬癸]|[A-Za-z][A-Za-z0-9_-]*)", content))
+    for name in re.findall(r"([\u4e00-\u9fff]{1,16})项目", content):
+        name = re.split(r"整理|提交|完成|回传|发送|取消|明天|今天|后天|给|发|做|的", name)[-1]
+        if name and name not in {"这个", "那个", "这次", "上次", "一个", "有个"}:
+            refs.add(name)
+    ignored = {"ai", "brief", "quote", "thread", "kol", "pdf", "ok", "ppt"}
+    refs.update(word for word in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", content) if word.casefold() not in ignored)
+    return {ref.casefold() for ref in refs}
+
+
+def promise_deliverables(content: str) -> set[str]:
+    return {name for name, pattern in (
+        ("draft", r"初稿|二稿|终稿|草稿|旧稿|稿件"),
+        ("data", r"数据|报表"), ("invoice", r"发票|开票"),
+        ("outline", r"大纲|框架|方案"), ("publish", r"发布|上线"),
+    ) if re.search(pattern, content)}
+
+
+def promise_rounds(content: str) -> set[str]:
+    return set(re.findall(r"\d{1,2}月|第[一二三四五六七八九十\d]+轮", content))
+
+
+def open_promise_rows(rows: list[dict[str, Any]], self_names: Iterable[str]) -> list[dict[str, Any]]:
+    """Conservative obligation tracking, isolated by conversation and project.
+
+    A vague acknowledgement cannot settle multiple promises. This is a report
+    inference only; it never mutates the manually maintained opportunity state.
+    """
+    names = tuple(self_names)
+    pending: list[dict[str, Any]] = []
+    for row in rows:
+        content = str(row.get("content") or "")
+        own = is_self_sender(str(row.get("sender") or ""), names)
+        is_promise = own and bool(PROMISE_TERMS.search(content))
+        cancelled = bool(re.search(r"取消了|已取消|已经取消|这(?:一)?轮取消|不用(?:再)?(?:交|提交|做|写)|不需要(?:再)?(?:交|提交|做|写)", content))
+        uncertain = bool(re.search(r"如果|假如|要是|是否|会不会|取消[吗么?？]|不取消|未取消|还没|尚未|没有(?:完成|提交|发送|发布|回传)|还未", content))
+        completed = own and bool(PROMISE_COMPLETION_TERMS.search(content))
+        if re.search(r"明天|后天|下周|稍后|之后|等.+再|准备|计划|还要", content):
+            completed = False
+        if is_promise:
+            completed = False
+        if (cancelled or completed) and not uncertain:
+            projects = promise_projects(content)
+            objects = promise_deliverables(content)
+            candidates = []
+            for promise in pending:
+                if conversation_key(str(row.get("chat") or ""), str(row.get("source_file") or "")) != conversation_key(str(promise.get("chat") or ""), str(promise.get("source_file") or "")):
+                    continue
+                old = str(promise["content"])
+                old_projects = promise_projects(old)
+                if projects and (not old_projects or projects != old_projects):
+                    continue
+                if promise_rounds(content) and promise_rounds(old) and promise_rounds(content) != promise_rounds(old):
+                    continue
+                old_objects = promise_deliverables(old)
+                if objects and old_objects and not objects.intersection(old_objects):
+                    continue
+                candidates.append(promise)
+            # An unqualified "done/cancelled" cannot resolve several obligations.
+            if len(candidates) == 1:
+                pending.remove(candidates[0])
+        if is_promise and not cancelled:
+            projects = promise_projects(content)
+            if projects:
+                pending = [old for old in pending if not (
+                    conversation_key(str(row.get("chat") or ""), str(row.get("source_file") or ""))
+                    == conversation_key(str(old.get("chat") or ""), str(old.get("source_file") or ""))
+                    and projects == promise_projects(str(old["content"]))
+                    and promise_deliverables(content) == promise_deliverables(str(old["content"]))
+                    and promise_rounds(content) == promise_rounds(str(old["content"]))
+                )]
+            pending.append(row)
+    return pending
 
 
 def known_group_chats(conn: sqlite3.Connection) -> set[str]:
@@ -470,10 +549,7 @@ def reply_report(
     incoming = [row for row in conversation if not is_self_sender(str(row["sender"]), self_names)]
     latest_incoming = incoming[-1] if incoming else None
     latest_overall = conversation[-1] if conversation else None
-    promises = [
-        row for row in messages
-        if is_self_sender(str(row["sender"]), self_names) and PROMISE_TERMS.search(str(row["content"]))
-    ]
+    promises = open_promise_rows(messages, self_names)
     opportunity_row = conn.execute(
         """
         select id, title, stage, status, priority, next_action, next_follow_up
@@ -532,8 +608,9 @@ def reply_report(
     )
     if opportunity:
         lines.append(f"- 商机：#{opportunity['id']}｜{stage}｜{str(opportunity.get('next_action') or '待确认')}")
-    if promises and reply_needed:
-        lines.append(f"- 注意已有承诺：{shorten(promises[-1]['content'], 100)}")
+    if reply_needed:
+        for promise in promises:
+            lines.append(f"- 注意待核实承诺：{shorten(promise['content'], 100)}")
     metadata = {
         "chat": chat,
         "messages": len(messages),
@@ -816,24 +893,8 @@ def brief_report(
     open_promises: list[tuple[str, dict[str, Any], str]] = []
     for chat, rows in direct_ranked_all:
         ordered = sorted(rows, key=lambda row: timestamp_epoch(row["time"]) or 0)
-        promise_indexes = [
-            index
-            for index, row in enumerate(ordered)
-            if is_self_sender(str(row["sender"]), self_names)
-            and PROMISE_TERMS.search(str(row["content"]))
-        ]
-        if not promise_indexes:
-            continue
-        promise_index = promise_indexes[-1]
-        later_self_messages = [
-            row
-            for row in ordered[promise_index + 1 :]
-            if is_self_sender(str(row["sender"]), self_names)
-        ]
-        if any(PROMISE_COMPLETION_TERMS.search(str(row["content"])) for row in later_self_messages):
-            continue
-        promise = ordered[promise_index]
-        open_promises.append((chat, promise, infer_promise_action(str(promise["content"]))))
+        for promise in open_promise_rows(ordered, self_names):
+            open_promises.append((chat, promise, infer_promise_action(str(promise["content"]))))
     open_promises.sort(key=lambda item: str(item[1]["time"]), reverse=True)
 
     tracked_opportunities = [
