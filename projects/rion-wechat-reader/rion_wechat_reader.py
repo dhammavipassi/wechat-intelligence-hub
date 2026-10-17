@@ -483,6 +483,24 @@ class DatabaseSet:
                 result[name] = value
         return result
 
+    @staticmethod
+    def _checkpoint_wal_copy(snapshot: Path, module: Any, key: str) -> None:
+        """快照副本先合并 WAL：WAL 库以 mode=ro URI 打开需要现场创建 -shm/-wal，
+        只读受限的进程上下文里这一步报 unable to open database file。
+        副本是一次性临时文件，就地 journal_mode=DELETE 合并后只读打开必然成立。"""
+        conn = None
+        try:
+            conn = module.connect(str(snapshot))
+            if key:
+                conn.execute(f"PRAGMA key=\"x'{key}'\"")
+            if str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "wal":
+                conn.execute("PRAGMA journal_mode=DELETE")
+        except Exception:
+            pass  # 检查点尽力而为；失败仍按既有路径只读打开
+        finally:
+            if conn is not None:
+                conn.close()
+
     @contextlib.contextmanager
     def connect(self, source: Path):
         if not source.exists():
@@ -496,6 +514,7 @@ class DatabaseSet:
             if module is None:
                 raise ReaderError("检测到加密数据库密钥，但未安装兼容的 sqlcipher3/pysqlcipher3 DB-API 驱动")
         with Snapshot(source) as snapshot:
+            self._checkpoint_wal_copy(snapshot, module, key)
             conn = None
             try:
                 uri = snapshot.resolve().as_uri() + "?mode=ro"
