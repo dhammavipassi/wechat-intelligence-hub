@@ -308,21 +308,57 @@ def database_salt(path: Path) -> str:
 
 
 class Snapshot:
+    """只读快照：db + -wal + -shm 成套复制，撕裂自检重拍。
+
+    微信并发写入时，逐文件复制会产生撕裂副本——db 页与 -wal 记录分属两个时刻，
+    SQLite 回放后校验和失败，只读打开报 unable to open database file。
+    判据是复制前后源 db/-wal 的 (size, mtime) 指纹一致；撕裂则清场重拍（有限次，带退避）。
+    -shm 是 WAL 索引且被微信持续触碰，不参与一致性判据。
+    """
+
     def __init__(self, source: Path):
         self.source = source
         self.temp: tempfile.TemporaryDirectory[str] | None = None
         self.path = source
 
+    @staticmethod
+    def _fingerprints(paths: list[Path]) -> list[tuple[int, int]]:
+        marks: list[tuple[int, int]] = []
+        for path in paths:
+            try:
+                st = path.stat()
+            except FileNotFoundError:
+                marks.append((-1, -1))
+                continue
+            marks.append((st.st_size, int(st.st_mtime_ns)))
+        return marks
+
+    def _consistency_paths(self, base: Path) -> list[Path]:
+        return [base, Path(str(base) + "-wal")]
+
+    def _collect(self, target_dir: Path) -> Path:
+        target = target_dir / self.source.name
+        shutil.copy2(self.source, target)
+        for suffix in ("-wal", "-shm"):
+            companion = Path(str(self.source) + suffix)
+            if companion.exists():
+                shutil.copy2(companion, Path(str(target) + suffix))
+        return target
+
     def __enter__(self) -> Path:
         self.temp = tempfile.TemporaryDirectory(prefix="rion-wechat-reader-")
         target_dir = Path(self.temp.name)
-        self.path = target_dir / self.source.name
         try:
-            shutil.copy2(self.source, self.path)
-            for suffix in ("-wal", "-shm"):
-                companion = Path(str(self.source) + suffix)
-                if companion.exists():
-                    shutil.copy2(companion, Path(str(self.path) + suffix))
+            self.path = self._collect(target_dir)
+            for _ in range(3):
+                if self._fingerprints(self._consistency_paths(self.source)) == \
+                        self._fingerprints(self._consistency_paths(self.path)):
+                    return self.path
+                # 撕裂：删除已复制的成套文件，退避后整组重拍
+                for candidate in [self.path] + [Path(str(self.path) + s) for s in ("-wal", "-shm")]:
+                    candidate.unlink(missing_ok=True)
+                time.sleep(0.25)
+                self.path = self._collect(target_dir)
         except OSError as exc:
             self.temp.cleanup()
             self.temp = None
