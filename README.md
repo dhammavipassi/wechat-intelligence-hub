@@ -10,7 +10,7 @@
 
 | Skill / Project | 作用 | 状态 |
 |---|---|---|
-| `wechat-cli` | Rion 自有的只读 Reader 入口；v0.9.2-preview.2 已覆盖旧版接口、schema-2 salt-key 授权导入、WCDB 压缩消息，并在维护者已有授权材料的本机完成实读 | 依赖层 / Preview |
+| `wechat-cli` | Rion 自有的只读 Reader 入口；v0.9.2-preview.2 覆盖完整可读接口、schema-2 salt-key 授权导入、WCDB 压缩消息，并在维护者已有授权材料的本机完成实读 | 依赖层 / Preview |
 | `wechat-intelligence-hub` | 把微信记录转成日报、待回复、承诺、商机和复联线索 | 用户入口 / Flagship |
 
 微信能力在代码中分成四层，方便独立测试和维护；对用户仍是一套产品、一次安装：
@@ -24,7 +24,7 @@ Rion 的通用 Skill 合集 `rionwu-skills` 只负责收录、发现和链接本
 
 ## 安装
 
-**9月22日接入更新：** 已增加材料编码/格式兼容、明确错误码、独立解密计数和`diagnose`诊断。JEV可选辅助分流，但不参与密钥验证；Windows首次获取仍待真机验收。见[更新与排障提示词](docs/access-upgrade-2026-09-22.md)。
+**接入能力：** 支持材料编码/格式兼容、明确错误码、独立解密计数和`diagnose`诊断。JEV可选辅助分流，但不参与密钥验证；Windows首次获取仍待真机验收。见[接入与排障说明](docs/access-upgrade-2026-09-22.md)。
 
 向维护者反馈前，让本地Codex运行`access.sh diagnose --support-summary`；Windows用Reader环境的Python运行`rion_wechat_access.py diagnose --support-summary`。它只输出允许分享的版本、状态、计数和错误码，仍请本人检查后再发。只有网页对话、没有本机文件及命令执行能力时，无法直接接入本机微信。另一个工具已能读取时，优先验证已有材料或已解密数据库，不要求重新获取；见[常见卡点处理](docs/access-support.md)。
 
