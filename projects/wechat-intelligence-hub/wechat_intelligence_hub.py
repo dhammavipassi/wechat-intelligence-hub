@@ -39,8 +39,6 @@ from opportunity_store import (
 )
 from maintenance import apply_cleanup, find_cleanup_candidates
 from intelligence_views import (
-    PROMISE_COMPLETION_TERMS,
-    PROMISE_TERMS,
     brief_report,
     home_report,
     infer_promise_action,
