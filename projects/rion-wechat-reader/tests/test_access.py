@@ -67,7 +67,8 @@ class AccessOnboardingTests(unittest.TestCase):
         from argparse import Namespace
         return Namespace(provider=self.provider, sha256=self.digest, database_root=self.db,
                          confirm_reviewed_provider=True, confirm_side_effects=True,
-                         config=self.root / "reader" / "config.json", timeout=30, max_files=500)
+                         config=self.root / "reader" / "config.json", timeout=30, max_files=500,
+                         attempt_id="attempt-test")
 
     def test_plan_does_not_execute_or_expose_paths(self):
         with mock.patch.object(access.subprocess, "run", side_effect=AssertionError("must not execute")):
@@ -197,6 +198,7 @@ class AccessOnboardingTests(unittest.TestCase):
              mock.patch.object(access.os, "chown"), \
              mock.patch.object(access, "preflight_debugger"), \
              mock.patch.object(access, "bounded_provider", return_value="provider_finished") as invoke, \
+             mock.patch.object(access.os, "replace", wraps=os.replace) as replace, \
              mock.patch.dict(os.environ, {"WXKEY_BOOTSTRAP_ORIGINAL_WECHAT": "1", "SECRET_PASSWORD": "must-not-pass"}):
             self.assertEqual(access.worker(args), 0)
         env = invoke.call_args.args[1]
@@ -205,9 +207,23 @@ class AccessOnboardingTests(unittest.TestCase):
         self.assertNotIn("SECRET_PASSWORD", env)
         result = json.loads((run_dir / "worker-result.json").read_text())
         self.assertEqual(result['state'], 'provider_finished')
+        self.assertEqual(result['attempt_id'], 'attempt-test')
+        self.assertEqual(result['phase'], 'provider_exit')
         self.assertTrue(result['diagnostics']['provider_started'])
         self.assertEqual(result['diagnostics']['readable_database_count'], 1)
         self.assertEqual(invoke.call_args.args[0][-1], str(self.root))
+        self.assertGreaterEqual(replace.call_count, 4)
+
+    def test_worker_running_result_is_available_before_preflight(self):
+        directory = self.root / '.config/rion-wechat-reader/access-runs/run-test'
+        directory.mkdir(parents=True)
+        path = directory / 'worker-result.json'
+        access.write_worker_result(path, 'running', 'run-test', {'phase': 'worker_preflight', 'provider_started': False})
+        result = access.read_worker_result(path)
+        self.assertEqual(result, {
+            'state': 'running', 'attempt_id': 'run-test', 'phase': 'worker_preflight',
+            'diagnostics': {'phase': 'worker_preflight', 'provider_started': False, 'signals': []},
+        })
 
     def test_preflight_reads_header_without_exposing_paths_or_content(self):
         (self.db / 'sample.db').write_bytes(b'fictional-header')
@@ -295,7 +311,7 @@ class AccessOnboardingTests(unittest.TestCase):
                 self.assertFalse(result['diagnostics']['provider_started'])
 
     def test_encrypted_connect_publishes_only_verified_generation(self):
-        import test_reader as fixtures
+        from tests import test_reader as fixtures
         if fixtures.SQLCIPHER is None:
             self.skipTest("SQLCipher unavailable")
         fixture = fixtures.ReaderContractTest()
@@ -423,7 +439,7 @@ class AccessOnboardingTests(unittest.TestCase):
         self.assertEqual(result["state"], "access_material_requires_review")
 
     def test_onboard_plaintext_requires_apply_then_publishes_verified_config(self):
-        import test_reader as fixtures
+        from tests import test_reader as fixtures
         fixture = fixtures.ReaderContractTest()
         fixture.setUp()
         try:
@@ -444,7 +460,7 @@ class AccessOnboardingTests(unittest.TestCase):
             fixture.tearDown()
 
     def test_onboard_fresh_home_acquisition_then_real_encrypted_connect(self):
-        import test_reader as fixtures
+        from tests import test_reader as fixtures
         if fixtures.SQLCIPHER is None:
             self.skipTest("SQLCipher unavailable")
         fixture = fixtures.ReaderContractTest()
@@ -604,7 +620,7 @@ class AccessOnboardingTests(unittest.TestCase):
             access.read_worker_result(path)
 
     def test_onboard_converts_relative_bundle_without_reacquisition(self):
-        import test_reader as fixtures
+        from tests import test_reader as fixtures
         if fixtures.SQLCIPHER is None:
             self.skipTest("SQLCipher unavailable")
         fixture = fixtures.ReaderContractTest()
@@ -633,7 +649,7 @@ class AccessOnboardingTests(unittest.TestCase):
             fixture.tearDown()
 
     def test_normalized_salt_material_can_be_reused_and_salt_mismatch_rejected(self):
-        import test_reader as fixtures
+        from tests import test_reader as fixtures
         if fixtures.SQLCIPHER is None:
             self.skipTest("SQLCipher unavailable")
         fixture = fixtures.ReaderContractTest()

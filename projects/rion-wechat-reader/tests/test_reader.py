@@ -810,9 +810,42 @@ class ReaderContractTest(unittest.TestCase):
     def test_tail_returns_only_messages_after_cursor(self):
         payload = self.run_cli("tail", "wxid_alice", "--since-local-id", "1", "--limit", "10")
         self.assertEqual([row["local_id"] for row in payload["data"]["events"]], [2])
-        self.assertEqual(payload["data"]["cursor"], 2)
+        self.assertEqual(json.loads(payload["data"]["cursor"]), {"0:message_0.db": 2})
         alias_payload = self.run_cli("read_events", "--talker", "wxid_alice", "--cursor", "1")
         self.assertEqual([row["local_id"] for row in alias_payload["data"]["events"]], [2])
+
+    def test_tail_cursor_is_per_shard_and_does_not_drop_filtered_rows(self):
+        second = self.data_root / "message_1.db"
+        table = "Msg_" + hashlib.md5(b"wxid_alice").hexdigest()
+        with sqlite3.connect(second) as conn:
+            conn.execute("CREATE TABLE Name2Id(user_name TEXT PRIMARY KEY, is_session INTEGER)")
+            conn.execute("INSERT INTO Name2Id(rowid, user_name, is_session) VALUES(1, 'wxid_alice', 1)")
+            conn.execute("INSERT INTO Name2Id(rowid, user_name, is_session) VALUES(2, 'wxid_me', 1)")
+            conn.execute(f'''CREATE TABLE "{table}"(
+                local_id INTEGER PRIMARY KEY, server_id INTEGER, local_type INTEGER,
+                sort_seq INTEGER, real_sender_id INTEGER, create_time INTEGER,
+                status INTEGER, message_content TEXT, compress_content TEXT)''')
+            conn.execute(f'INSERT INTO "{table}" VALUES(1, 201, 1, 1, 2, 300, 0, "另一分片的消息", "")')
+        with sqlite3.connect(self.message) as conn:
+            conn.execute(f'INSERT INTO "{table}" VALUES(100, 100, 1, 100, 1, 100, 0, "较早但ID很大", "")')
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        config["message_dbs"].append(str(second))
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+        first = self.run_cli("tail", "wxid_alice", "--cursor", "0", "--from-me", "--limit", "10")
+        self.assertEqual([row["local_id"] for row in first["data"]["events"]], [2, 1])
+        cursor = json.loads(first["data"]["cursor"])
+        self.assertEqual(cursor, {"0:message_0.db": 100, "1:message_1.db": 1})
+        resumed = self.run_cli("tail", "wxid_alice", "--cursor", json.dumps(cursor), "--from-me", "--limit", "10")
+        self.assertEqual(resumed["data"]["events"], [])
+
+    def test_tail_limit_does_not_advance_past_undelivered_shard_rows(self):
+        table = "Msg_" + hashlib.md5(b"wxid_alice").hexdigest()
+        with sqlite3.connect(self.message) as conn:
+            conn.execute(f'INSERT INTO "{table}" VALUES(3, 103, 1, 3, 1, 300, 0, "下一条", "")')
+        first = self.run_cli("tail", "wxid_alice", "--cursor", "0", "--limit", "1")
+        self.assertEqual([row["local_id"] for row in first["data"]["events"]], [1])
+        second = self.run_cli("tail", "wxid_alice", "--cursor", first["data"]["cursor"], "--limit", "2")
+        self.assertEqual([row["local_id"] for row in second["data"]["events"]], [2, 3])
 
     def test_tail_jsonl_and_bounded_follow(self):
         jsonl_row = self.run_with_config(

@@ -1414,21 +1414,103 @@ def hardlink_resources(
 def tail_messages(
     db: DatabaseSet,
     chat: str,
-    since_local_id: int,
+    since: int | dict[str, int],
     limit: int,
     scan_limit: int,
     after: str | None,
 ) -> list[dict[str, Any]]:
-    rows = timeline(db, chat, max(limit, scan_limit), 0, after, None)
-    rows = [row for row in rows if int(row.get("local_id") or 0) > since_local_id]
-    rows.sort(key=lambda row: (int(row.get("create_time") or 0), int(row.get("local_id") or 0)))
-    return rows[-limit:]
+    rows, _ = scan_tail(db, chat, since, limit, scan_limit, after)
+    return rows
+
+
+def _tail_shards(db: DatabaseSet, chat: str) -> list[tuple[str, Any, str]]:
+    username = resolve_username(db, chat)
+    table = message_table(username)
+    shards = []
+    for ordinal, source in enumerate(db.message_dbs):
+        with db.connect(source) as conn:
+            exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+        if exists:
+            shards.append((f"{ordinal}:{source.name}", source, table))
+    return shards
+
+
+def _tail_cursor(since: int | dict[str, int], shard: str) -> int:
+    # 旧整数游标不能证明任一具体分片的位置，只作为共同的兼容起点。
+    return since.get(shard, 0) if isinstance(since, dict) else since
+
+
+def _cursor_json(cursor: dict[str, int]) -> str:
+    return json.dumps(cursor, ensure_ascii=False, separators=(",", ":"))
+
+
+def scan_tail(
+    db: DatabaseSet,
+    chat: str,
+    since: int | dict[str, int],
+    limit: int,
+    scan_limit: int,
+    after: str | None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """每分片从自己的 local_id 扫描；limit 截断时保留未投递部分。"""
+    events: list[tuple[dict[str, Any], str]] = []
+    cursor: dict[str, int] = {}
+    contacts = db.contact_index()
+    username = resolve_username(db, chat)
+    for shard, source, table in _tail_shards(db, chat):
+        position = _tail_cursor(since, shard)
+        cursor[shard] = position
+        with db.connect(source) as conn:
+            sender_names = {
+                int(row["rowid"]): str(row["user_name"])
+                for row in conn.execute("SELECT rowid, user_name FROM Name2Id").fetchall()
+            }
+            fields = message_projection(conn, table)
+            params: list[Any] = []
+            start = parse_time(after)
+            where = "local_id > ?"
+            params.append(position)
+            if start is not None:
+                where += " AND create_time >= ?"
+                params.append(start)
+            rows = conn.execute(
+                f'SELECT {fields} FROM "{table}" WHERE {where} '
+                "ORDER BY local_id ASC LIMIT ?",
+                (*params, max(1, scan_limit)),
+            ).fetchall()
+            for row in rows:
+                local_id = int(row["local_id"] or 0)
+                if len(events) >= limit:
+                    break
+                item = dict(row)
+                sender_username = sender_names.get(int(item.get("real_sender_id") or 0), "")
+                sender = contacts.get(sender_username, {}).get("display_name") or sender_username
+                content = visible_message_content(decode_message_content(item), username, sender_username)
+                item.update({
+                    "chat": contacts.get(username, {}).get("display_name") or username,
+                    "talker": username,
+                    "sender": sender,
+                    "sender_wxid": sender_username,
+                    "from_me": bool(db.self_username and sender_username == db.self_username),
+                    "text": str(content), "content": str(content),
+                    "time": time_iso(item.get("create_time")),
+                    "kind_name": message_kind(int(item.get("local_type") or 0), str(content)),
+                })
+                events.append((item, shard))
+                cursor[shard] = local_id
+        # 未扫描行下一轮继续；本函数与 follow 都消费这个扫描游标。
+    result = []
+    for item, shard in events:
+        item["_cursor_shard"] = shard
+        result.append(item)
+    result.sort(key=lambda row: (int(row.get("create_time") or 0), int(row.get("local_id") or 0), row["_cursor_shard"]))
+    return result, cursor
 
 
 def stream_tail(
     db: DatabaseSet,
     chat: str,
-    since_local_id: int,
+    since: int | dict[str, int],
     limit: int,
     scan_limit: int,
     after: str | None,
@@ -1439,11 +1521,10 @@ def stream_tail(
     from_me: bool | None = None,
     kind_name: str | None = None,
 ) -> None:
-    cursor = since_local_id
+    cursor = since
     polls = 0
     while True:
-        raw_rows = tail_messages(db, chat, cursor, limit, scan_limit, after)
-        next_cursor = max((int(row.get("local_id") or 0) for row in raw_rows), default=cursor)
+        raw_rows, next_cursor = scan_tail(db, chat, cursor, limit, scan_limit, after)
         rows = filter_message_rows(raw_rows, sender, from_me, kind_name)
         for row in rows:
             print(json.dumps(row, ensure_ascii=False), flush=True)
@@ -3057,7 +3138,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("chat", nargs="?")
     p.add_argument("--talker")
     p.add_argument("--since-local-id", type=int, default=0)
-    p.add_argument("--cursor", type=int)
+    p.add_argument("--cursor")
     p.add_argument("--after")
     p.add_argument("--since")
     p.add_argument("--since-time")
@@ -3132,7 +3213,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(raw_args)
     args.pretty = pretty_anywhere
     args.strict_read_only = strict_anywhere
-    command = COMMAND_ALIASES.get(args.command, args.command)
+    command = COMMAND_ALIASES.get(args.command, args.command) or ""
     try:
         if command == "version":
             emit(command, {"name": "rion-wechat-cli", "version": VERSION}, args.pretty)
@@ -3337,7 +3418,17 @@ def main(argv: list[str] | None = None) -> int:
                 chat = args.chat or args.talker
                 if not chat:
                     raise ReaderError("tail 当前需要指定聊天对象", "missing_required_argument")
-                cursor = first_int(args.cursor, args.since_local_id) or 0
+                cursor: int | dict[str, int]
+                if args.cursor and args.cursor.lstrip().startswith("{"):
+                    parsed = json.loads(args.cursor)
+                    if not isinstance(parsed, dict) or not all(
+                        isinstance(key, str) and type(value) is int and value >= 0
+                        for key, value in parsed.items()
+                    ):
+                        raise ReaderError("分片游标必须是 shard 到非负 local_id 的 JSON 对象", "invalid_argument")
+                    cursor = parsed
+                else:
+                    cursor = first_int(args.cursor, args.since_local_id) or 0
                 after = args.after or args.since or args.since_time
                 follow = args.follow or args.mode == "follow"
                 if follow or args.jsonl:
@@ -3356,12 +3447,13 @@ def main(argv: list[str] | None = None) -> int:
                         args.kind_name,
                     )
                 else:
-                    rows = tail_messages(db, chat, cursor, args.limit, args.scan_limit, after)
+                    rows, next_cursor = scan_tail(db, chat, cursor, args.limit, args.scan_limit, after)
                     rows = filter_message_rows(rows, args.sender, args.from_me, args.kind_name)
-                    if args.debug or args.include_debug:
-                        for row in rows:
+                    for row in rows:
+                        row.pop("_cursor_shard", None)
+                        if args.debug or args.include_debug:
                             row["debug"] = {"media_paths_requested": str(args.include_media_paths).casefold() == "true"}
-                    emit(command, {"events": rows, "cursor": rows[-1]["local_id"] if rows else cursor}, args.pretty)
+                    emit(command, {"events": rows, "cursor": _cursor_json(next_cursor)}, args.pretty)
             elif command == "unread":
                 emit(command, {"sessions": unread_sessions(db, args.limit, args.type_filter or args.filter)}, args.pretty)
             elif command == "stats":

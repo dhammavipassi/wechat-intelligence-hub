@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 import rion_wechat_reader as reader
 
@@ -279,7 +280,7 @@ PREFLIGHT_ERRORS = {
     "debugger_api_incompatible", "worker_preflight_failed",
     "other_user_wechat_running", "other_wechat_install_running",
 }
-WORKER_STATES = PREFLIGHT_ERRORS | {"provider_finished", "provider_failed", "provider_start_failed", "provider_timeout_cleanup_required"}
+WORKER_STATES = PREFLIGHT_ERRORS | {"running", "provider_finished", "provider_failed", "provider_start_failed", "provider_timeout_cleanup_required"}
 SIGNAL_ACTIONS = {
     "account_salt_mismatch": "核对正在登录的账号与所选db_storage是否一致；不要把别的账号材料混入本账号。",
     "no_derivation_observed": "未观察到目标派生调用；先核对登录状态、目标进程身份与当前版本兼容性，不能据此断言key不存在。",
@@ -346,7 +347,25 @@ def read_worker_result(path: Path) -> dict:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict) or not isinstance(value.get("state"), str) or value["state"] not in WORKER_STATES:
         raise AccessError("worker_result_invalid")
-    return {"state": value["state"], "diagnostics": safe_diagnostics(value.get("diagnostics"))}
+    result = {"state": value["state"], "diagnostics": safe_diagnostics(value.get("diagnostics"))}
+    if isinstance(value.get("attempt_id"), str):
+        result["attempt_id"] = value["attempt_id"]
+    if isinstance(value.get("phase"), str) and value["phase"] in {"worker_preflight", "database_preflight", "debugger_preflight", "provider_start", "provider_exit", "provider_timeout"}:
+        result["phase"] = value["phase"]
+    return result
+
+
+def write_worker_result(path: Path, state: str, attempt_id: str, diagnostics: dict) -> None:
+    """把 running/阶段/终态一次性替换，读者不会看到半份 JSON。"""
+    payload = {"state": state, "attempt_id": attempt_id,
+               "phase": diagnostics.get("phase"), "diagnostics": diagnostics}
+    temporary = path.with_name(".worker-result.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
 
 
 def access_status(config: Path, root: Path | None, max_files: int) -> dict:
@@ -580,6 +599,10 @@ def worker(args: argparse.Namespace) -> int:
         "WXKEY_SETUP_TIMEOUT": "180s", "WXKEY_PBKDF_PROBE_TIMEOUT": "180s",
     }
     diagnostics = {"phase": "worker_preflight", "provider_started": False}
+    attempt_id = args.attempt_id
+    result_file = run_dir / "worker-result.json"
+    write_worker_result(result_file, "running", attempt_id, diagnostics)
+    os.chown(result_file, args.uid, owner.pw_gid)
     try:
         if provider_digest(args.provider) != args.sha256.lower():
             raise AccessError("provider_digest_mismatch")
@@ -599,8 +622,10 @@ def worker(args: argparse.Namespace) -> int:
             if fields[1] != official_wechat:
                 raise AccessError("other_wechat_install_running")
         diagnostics["phase"] = "database_preflight"
+        write_worker_result(result_file, "running", attempt_id, diagnostics)
         diagnostics["readable_database_count"] = preflight_database_access(root, getattr(args, "max_files", 500))
         diagnostics["phase"] = "debugger_preflight"
+        write_worker_result(result_file, "running", attempt_id, diagnostics)
         preflight_debugger()
     except AccessError as exc:
         state = str(exc) if str(exc) in PREFLIGHT_ERRORS else "worker_preflight_failed"
@@ -608,6 +633,7 @@ def worker(args: argparse.Namespace) -> int:
         state = "worker_preflight_failed"
     else:
         diagnostics["phase"] = "provider_start"
+        write_worker_result(result_file, "running", attempt_id, diagnostics)
         try:
             diagnostics["provider_started"] = True
             state = bounded_provider([str(args.provider), "bootstrap", "--root", str(account_root)], env, args.timeout,
@@ -615,11 +641,13 @@ def worker(args: argparse.Namespace) -> int:
         except (OSError, subprocess.SubprocessError):
             diagnostics["provider_started"] = False
             state = "provider_start_failed"
-    # Exclusive creation avoids replacing any existing recovery result.
-    fd = os.open(str(run_dir / "worker-result.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump({"state": state, "diagnostics": diagnostics}, handle)
-    os.chown(run_dir / "worker-result.json", args.uid, owner.pw_gid)
+    # 终态只原子替换本 attempt 的 running 结果，不创建第二份恢复记录。
+    if state in {"provider_finished", "provider_failed"}:
+        diagnostics["phase"] = "provider_exit"
+    elif state == "provider_timeout_cleanup_required":
+        diagnostics["phase"] = "provider_timeout"
+    write_worker_result(result_file, state, attempt_id, diagnostics)
+    os.chown(result_file, args.uid, owner.pw_gid)
     return 0 if state == "provider_finished" else 1
 
 
@@ -712,7 +740,8 @@ def run(args: argparse.Namespace) -> dict:
     run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=parent))
     argv = [sys.executable, str(Path(__file__).resolve()), "_worker", "--provider", str(args.provider.absolute()),
             "--sha256", args.sha256, "--database-root", str(root), "--run-dir", str(run_dir),
-            "--uid", str(os.getuid()), "--timeout", str(args.timeout), "--max-files", str(args.max_files)]
+            "--uid", str(os.getuid()), "--timeout", str(args.timeout), "--max-files", str(args.max_files),
+            "--attempt-id", uuid.uuid4().hex]
     command = "exec " + shlex.join(argv) + " >/dev/null 2>&1"
     script = "do shell script " + json.dumps(command, ensure_ascii=False) + " with administrator privileges"
     try:
@@ -871,6 +900,7 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--config", type=Path, default=reader.DEFAULT_CONFIG)
             p.add_argument("--max-files", type=int, default=500)
         if name == "_worker":
+            p.add_argument("--attempt-id", required=True)
             p.add_argument("--uid", type=int, required=True)
             p.add_argument("--run-dir", type=Path, required=True)
             p.add_argument("--max-files", type=int, default=500)
