@@ -897,7 +897,7 @@ def main(argv: list[str] | None = None) -> int:
         if name == "run":
             p.add_argument("--confirm-reviewed-provider", action="store_true")
             p.add_argument("--confirm-side-effects", action="store_true")
-            p.add_argument("--config", type=Path, default=reader.DEFAULT_CONFIG)
+            p.add_argument("--config", type=Path, default=Path(os.environ.get("RION_WECHAT_READER_CONFIG", str(reader.DEFAULT_CONFIG))))
             p.add_argument("--max-files", type=int, default=500)
         if name == "_worker":
             p.add_argument("--attempt-id", required=True)
@@ -907,7 +907,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("connect")
     p.add_argument("--source", required=True, type=Path)
     p.add_argument("--database-root", required=True, type=Path)
-    p.add_argument("--config", type=Path, default=reader.DEFAULT_CONFIG)
+    p.add_argument("--config", type=Path, default=Path(os.environ.get("RION_WECHAT_READER_CONFIG", str(reader.DEFAULT_CONFIG))))
     p.add_argument("--max-files", type=int, default=500)
     p = sub.add_parser("finish-recovery", help="Remove only a reviewed recovery lock; requires post-run user confirmation")
     p.add_argument("--confirm-wechat-ready", action="store_true")

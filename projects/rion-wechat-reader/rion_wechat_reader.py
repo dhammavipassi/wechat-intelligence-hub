@@ -349,21 +349,28 @@ class Snapshot:
         self.temp = tempfile.TemporaryDirectory(prefix="rion-wechat-reader-")
         target_dir = Path(self.temp.name)
         try:
-            self.path = self._collect(target_dir)
-            for _ in range(3):
-                if self._fingerprints(self._consistency_paths(self.source)) == \
-                        self._fingerprints(self._consistency_paths(self.path)):
-                    return self.path
-                # 撕裂：删除已复制的成套文件，退避后整组重拍
-                for candidate in [self.path] + [Path(str(self.path) + s) for s in ("-wal", "-shm")]:
-                    candidate.unlink(missing_ok=True)
-                time.sleep(0.25)
+            if platform.system() == "Windows" and not windows_private_acl(target_dir, initialize=True):
+                raise ReaderError(permission_help(), "unsafe_key_permissions")
+            for attempt in range(4):
+                before = self._fingerprints(self._consistency_paths(self.source))
                 self.path = self._collect(target_dir)
+                after = self._fingerprints(self._consistency_paths(self.source))
+                copied = self._fingerprints(self._consistency_paths(self.path))
+                if before == after == copied:
+                    return self.path
+                if attempt < 3:
+                    for candidate in [self.path] + [Path(str(self.path) + s) for s in ("-wal", "-shm")]:
+                        candidate.unlink(missing_ok=True)
+                    time.sleep(0.25)
+            return self.path
+        except ReaderError:
+            self.temp.cleanup()
+            self.temp = None
+            raise
         except OSError as exc:
             self.temp.cleanup()
             self.temp = None
             raise ReaderError(f"无法创建只读快照：{self.source.name}: {exc}") from exc
-        return self.path
 
     def __exit__(self, *_: Any) -> None:
         if self.temp:
@@ -484,18 +491,36 @@ class DatabaseSet:
         return result
 
     @staticmethod
-    def _checkpoint_wal_copy(snapshot: Path, module: Any, key: str) -> None:
+    def _apply_key_pragmas(conn: Any, key_spec: dict[str, Any]) -> None:
+        key = str(key_spec.get("key") or "")
+        if not key:
+            return
+        conn.execute(f"PRAGMA key=\"x'{key}'\"")
+        for pragma in (
+            "cipher_compatibility",
+            "cipher_page_size",
+            "kdf_iter",
+            "cipher_use_hmac",
+            "cipher_plaintext_header_size",
+            "cipher_hmac_algorithm",
+            "cipher_kdf_algorithm",
+        ):
+            if pragma in key_spec:
+                conn.execute(f"PRAGMA {pragma}={key_spec[pragma]}")
+
+    @classmethod
+    def _checkpoint_wal_copy(cls, snapshot: Path, module: Any, key_spec: dict[str, Any]) -> None:
         """快照副本先合并 WAL：WAL 库以 mode=ro URI 打开需要现场创建 -shm/-wal，
         只读受限的进程上下文里这一步报 unable to open database file。
         副本是一次性临时文件，就地 journal_mode=DELETE 合并后只读打开必然成立。"""
         conn = None
+        db_err = getattr(module, "DatabaseError", sqlite3.DatabaseError)
         try:
             conn = module.connect(str(snapshot))
-            if key:
-                conn.execute(f"PRAGMA key=\"x'{key}'\"")
+            cls._apply_key_pragmas(conn, key_spec)
             if str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "wal":
                 conn.execute("PRAGMA journal_mode=DELETE")
-        except Exception:
+        except (sqlite3.DatabaseError, db_err, OSError):
             pass  # 检查点尽力而为；失败仍按既有路径只读打开
         finally:
             if conn is not None:
@@ -514,25 +539,13 @@ class DatabaseSet:
             if module is None:
                 raise ReaderError("检测到加密数据库密钥，但未安装兼容的 sqlcipher3/pysqlcipher3 DB-API 驱动")
         with Snapshot(source) as snapshot:
-            self._checkpoint_wal_copy(snapshot, module, key)
+            self._checkpoint_wal_copy(snapshot, module, key_spec)
             conn = None
             try:
                 uri = snapshot.resolve().as_uri() + "?mode=ro"
                 conn = module.connect(uri, uri=True)
                 conn.row_factory = getattr(module, "Row", sqlite3.Row)
-                if key:
-                    conn.execute(f"PRAGMA key=\"x'{key}'\"")
-                    for pragma in (
-                        "cipher_compatibility",
-                        "cipher_page_size",
-                        "kdf_iter",
-                        "cipher_use_hmac",
-                        "cipher_plaintext_header_size",
-                        "cipher_hmac_algorithm",
-                        "cipher_kdf_algorithm",
-                    ):
-                        if pragma in key_spec:
-                            conn.execute(f"PRAGMA {pragma}={key_spec[pragma]}")
+                self._apply_key_pragmas(conn, key_spec)
                 conn.execute("PRAGMA query_only=ON")
                 conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
                 yield conn
@@ -768,7 +781,7 @@ def filter_message_rows(
             continue
         if kind_needle and str(row.get("kind_name") or "").casefold().replace("-", "_") != kind_needle:
             continue
-        if base_kind is not None and int(row.get("local_type") or 0) != base_kind:
+        if base_kind is not None and (int(row.get("local_type") or 0) & 0xFFFFFFFF) != base_kind:
             continue
         result.append(row)
     return result
@@ -1527,7 +1540,9 @@ def stream_tail(
         raw_rows, next_cursor = scan_tail(db, chat, cursor, limit, scan_limit, after)
         rows = filter_message_rows(raw_rows, sender, from_me, kind_name)
         for row in rows:
-            print(json.dumps(row, ensure_ascii=False), flush=True)
+            out = dict(row)
+            out.pop("_cursor_shard", None)
+            print(json.dumps(json_safe(out), ensure_ascii=False), flush=True)
         cursor = next_cursor
         polls += 1
         if not follow or max_polls > 0 and polls >= max_polls:
@@ -2007,7 +2022,8 @@ def notification_records(limit: int, after: str | None, keyword: str | None) -> 
         raise ReaderError("找不到 macOS Notification Center 数据库")
     start = parse_time(after)
     with Snapshot(path) as snapshot:
-        conn = sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True)
+        DatabaseSet._checkpoint_wal_copy(snapshot, sqlite3, {})
+        conn = sqlite3.connect(snapshot.resolve().as_uri() + "?mode=ro", uri=True)
         try:
             query = (
                 "SELECT record.data, record.delivered_date FROM record JOIN app USING(app_id) "
@@ -3420,7 +3436,10 @@ def main(argv: list[str] | None = None) -> int:
                     raise ReaderError("tail 当前需要指定聊天对象", "missing_required_argument")
                 cursor: int | dict[str, int]
                 if args.cursor and args.cursor.lstrip().startswith("{"):
-                    parsed = json.loads(args.cursor)
+                    try:
+                        parsed = json.loads(args.cursor)
+                    except json.JSONDecodeError as exc:
+                        raise ReaderError("分片游标不是合法 JSON 对象", "invalid_argument") from exc
                     if not isinstance(parsed, dict) or not all(
                         isinstance(key, str) and type(value) is int and value >= 0
                         for key, value in parsed.items()

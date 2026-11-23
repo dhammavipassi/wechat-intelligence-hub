@@ -1263,7 +1263,12 @@ def local_timestamp(value: str | None) -> int | None:
 
 
 def resolve_time_window(since: str | None, until: str | None, hours: float = 24) -> tuple[str, str]:
-    end = parse_time_for_filter(until) if until else datetime.now()
+    if until:
+        end = parse_time_for_filter(until)
+        if not end:
+            raise SystemExit(f"无法识别结束时间：{until}")
+    else:
+        end = datetime.now()
     if since:
         start = parse_time_for_filter(since)
         if not start:
@@ -1313,8 +1318,9 @@ def fetch_sessions(wechat_cli: Path, limit: int, type_filter: str | None = None)
 
 def resolve_chat_session(wechat_cli: Path, chat: str, type_filter: str | None = None) -> dict[str, Any]:
     command = [str(wechat_cli), "resolve-chat", chat]
-    if type_filter and type_filter != "all":
-        command.extend(["--type-filter", type_filter])
+    normalized_type = "private" if type_filter == "user" else type_filter
+    if normalized_type and normalized_type != "all":
+        command.extend(["--type-filter", normalized_type])
     raw = run_json_command(command)
     data = raw.get("data") if isinstance(raw, dict) else {}
     candidates = data.get("candidates") if isinstance(data, dict) else None
@@ -4948,6 +4954,7 @@ def person_command(args: argparse.Namespace) -> None:
             conn,
             person_query,
             since=args.since,
+            until=args.until,
             limit=args.limit,
             self_names=configured_self_names(args.self_name),
         )
@@ -5561,18 +5568,19 @@ def opportunity_sync_command(args: argparse.Namespace) -> None:
         raise SystemExit(f"找不到数据库：{db_path}")
     conn = connect_radar_db(str(db_path))
     init_radar_db(conn)
+    register_time_sql(conn)
     sql = "select chat, sender, time, content, source_file from messages where 1 = 1"
     params: list[Any] = []
     if args.since:
-        sql += " and time >= ?"
+        sql += " and message_epoch(time) >= message_epoch(?)"
         params.append(normalize_time(args.since))
     if args.until:
-        sql += " and time <= ?"
+        sql += " and message_epoch(time) <= message_epoch(?)"
         params.append(normalize_time(args.until))
     if args.chat:
         sql += " and chat like ?"
         params.append(f"%{args.chat}%")
-    sql += " order by time asc"
+    sql += " order by message_epoch(time) asc, id asc"
     messages = [Message(**dict(row)) for row in conn.execute(sql, params).fetchall()]
     messages = filter_by_exclude_list(messages, load_watchlist(args.exclude_list))
     candidates = build_opportunity_candidates(messages, load_known_group_chats(conn))
@@ -5713,6 +5721,7 @@ def db_links(args: argparse.Namespace) -> None:
         raise SystemExit(f"找不到数据库：{db_path}")
     conn = connect_radar_db(str(db_path))
     init_radar_db(conn)
+    register_time_sql(conn)
     backfill_message_links(conn)
     sql = """
         select l.url, m.chat, m.sender, m.time, m.content
@@ -5722,10 +5731,10 @@ def db_links(args: argparse.Namespace) -> None:
     """
     params: list[Any] = []
     if args.since:
-        sql += " and m.time >= ?"
+        sql += " and message_epoch(m.time) >= message_epoch(?)"
         params.append(normalize_time(args.since))
     if args.until:
-        sql += " and m.time <= ?"
+        sql += " and message_epoch(m.time) <= message_epoch(?)"
         params.append(normalize_time(args.until))
     if args.chat:
         sql += " and m.chat like ?"
@@ -7229,7 +7238,7 @@ def build_parser() -> argparse.ArgumentParser:
     person_parser.add_argument("--limit", type=int, default=500, help="最多分析最近多少条消息，默认 500")
     person_parser.add_argument("--refresh", action="store_true", help="先从微信实时刷新该联系人，再生成报告")
     person_parser.add_argument("--wechat-cli", default=DEFAULT_WECHAT_READER, help="只读 Reader 路径；只在 --refresh 时使用")
-    person_parser.add_argument("--type", dest="type_filter", choices=["user", "group"], help="实时刷新时限定私聊或群聊")
+    person_parser.add_argument("--type", dest="type_filter", choices=["private", "group", "user"], help="实时刷新时限定私聊或群聊")
     person_parser.add_argument("--self-name", action="append", help="补充你的微信发送者名字，可重复；默认读取 Profile")
     person_parser.add_argument("--out", help="输出 Markdown 文件")
     person_parser.set_defaults(func=person_command)

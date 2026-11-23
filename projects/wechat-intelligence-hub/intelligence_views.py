@@ -66,6 +66,15 @@ def normalize_since(value: str | None) -> str:
     return value
 
 
+def normalize_until(value: str | None) -> str:
+    if not value:
+        return ""
+    value = value.strip().replace("/", "-")
+    if len(value) == 10:
+        return value + " 23:59:59"
+    return value
+
+
 def is_self_sender(sender: str, self_names: Iterable[str]) -> bool:
     folded = sender.strip().casefold()
     return bool(folded) and any(folded == name.strip().casefold() for name in self_names if name.strip())
@@ -230,11 +239,13 @@ def home_report(
     *,
     now: datetime | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    register_time_sql(conn)
     current = now or datetime.now()
     today = current.strftime("%Y-%m-%d")
     recent_since = (current - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
     total_messages = int(conn.execute("select count(*) from messages").fetchone()[0])
-    latest_message = str(conn.execute("select max(time) from messages").fetchone()[0] or "")
+    latest_row = conn.execute("select time from messages order by message_epoch(time) desc limit 1").fetchone()
+    latest_message = str(latest_row[0] if latest_row and latest_row[0] else "")
     open_opportunities = int(
         conn.execute(
             "select count(*) from opportunities where status in ('active', 'waiting', 'paused') and priority >= 4"
@@ -256,7 +267,7 @@ def home_report(
         conn.execute(
             """
             select count(*) from opportunities
-            where status = 'new' and priority >= 4 and last_signal_time >= ?
+            where status = 'new' and priority >= 4 and message_epoch(last_signal_time) >= message_epoch(?)
             """,
             (recent_since,),
         ).fetchone()[0]
@@ -631,22 +642,27 @@ def person_report(
     query: str,
     *,
     since: str | None = None,
+    until: str | None = None,
     limit: int = 500,
     self_names: Iterable[str] = ("我", "me", "自己"),
 ) -> tuple[str, dict[str, Any]]:
+    register_time_sql(conn)
     chat = resolve_chat_name(conn, query)
     params: list[Any] = [chat]
     where = "chat = ?"
     if since:
-        where += " and time >= ?"
+        where += " and message_epoch(time) >= message_epoch(?)"
         params.append(normalize_since(since))
+    if until:
+        where += " and message_epoch(time) <= message_epoch(?)"
+        params.append(normalize_until(until))
     total = int(conn.execute(f"select count(*) from messages where {where}", params).fetchone()[0])
     rows = conn.execute(
         f"""
         select chat, sender, time, content, source_file
         from messages
         where {where}
-        order by time desc
+        order by message_epoch(time) desc, id desc
         limit ?
         """,
         [*params, max(1, limit)],
@@ -756,6 +772,7 @@ def topic_report(
     limit_messages: int = 800,
     limit_chats: int = 20,
 ) -> tuple[str, dict[str, Any]]:
+    register_time_sql(conn)
     terms = expand_topic_terms(topic, extra_keywords)
     clauses = ["lower(content) like ?" for _ in terms]
     params: list[Any] = [f"%{term.casefold()}%" for term in terms]
@@ -765,9 +782,9 @@ def topic_report(
         where ({' or '.join(clauses)})
     """
     if since:
-        sql += " and time >= ?"
+        sql += " and message_epoch(time) >= message_epoch(?)"
         params.append(normalize_since(since))
-    sql += " order by time desc limit ?"
+    sql += " order by message_epoch(time) desc, id desc limit ?"
     params.append(max(1, limit_messages))
     messages = [dict(row) for row in conn.execute(sql, params).fetchall()]
     groups = known_group_chats(conn)

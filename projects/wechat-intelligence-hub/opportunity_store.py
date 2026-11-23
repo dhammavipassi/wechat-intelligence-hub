@@ -186,6 +186,8 @@ def _candidate_expiry(candidate_time: str, created_at: str, days: int = 14) -> s
         parsed = datetime.fromisoformat(value)
     except ValueError:
         parsed = datetime.fromisoformat(created_at)
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone()
     return (parsed + timedelta(days=max(1, days))).strftime("%Y-%m-%d %H:%M:%S")
 
 

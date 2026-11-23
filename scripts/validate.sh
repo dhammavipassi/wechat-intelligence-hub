@@ -3,10 +3,18 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 validator="${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py"
-# 校验脚本的解释器必须可指定：nh3 等前置装在 Hub 的 .venv 里，盲取 PATH 上的 python3
-# 会让 test_report_security 整组报错退出（2026-10-17 实证）。契约同 reader.sh：
-# 由调用方声明解释器，脚本不猜。
-python_bin="${PYTHON_BIN:-python3}"
+# 校验脚本解释器优先使用 Hub .venv（含 nh3 等依赖），相对路径先归一化以兼容子目录执行
+if [ -n "${PYTHON_BIN:-}" ]; then
+  if [[ "$PYTHON_BIN" == */* && "$PYTHON_BIN" != /* ]]; then
+    python_bin="$(cd "$(dirname "$PYTHON_BIN")" && pwd)/$(basename "$PYTHON_BIN")"
+  else
+    python_bin="$PYTHON_BIN"
+  fi
+elif [ -x "$repo_root/projects/wechat-intelligence-hub/.venv/bin/python" ]; then
+  python_bin="$repo_root/projects/wechat-intelligence-hub/.venv/bin/python"
+else
+  python_bin="python3"
+fi
 
 move_temp_to_trash() {
   local source="$1"
@@ -76,11 +84,19 @@ trap - EXIT
 "$python_bin" -m py_compile "$repo_root/projects/rion-wechat-reader/scripts/live_parity.py"
 
 bash -n \
+  "$repo_root/scripts/install.sh" \
+  "$repo_root/scripts/validate.sh" \
   "$repo_root/projects/rion-wechat-reader/install.sh" \
   "$repo_root/projects/rion-wechat-reader/launcher.sh" \
   "$repo_root/projects/rion-wechat-reader/scripts/validate_sqlcipher.sh" \
   "$repo_root/skills/wechat-cli/scripts/reader.sh" \
-  "$repo_root/skills/wechat-cli/scripts/access.sh"
+  "$repo_root/skills/wechat-cli/scripts/access.sh" \
+  "$repo_root/skills/wechat-intelligence-hub/scripts/hub.sh" \
+  "$repo_root/projects/wechat-intelligence-hub/scripts/run_demo.sh" \
+  "$repo_root/projects/wechat-intelligence-hub/scripts/setup_html.sh" \
+  "$repo_root/projects/wechat-intelligence-hub/scripts/run_group_daily.sh"
+
+(cd "$repo_root" && PYTHON_BIN="$python_bin" "$repo_root/skills/wechat-intelligence-hub/scripts/hub.sh" --help >/dev/null)
 
 if rg -n 'command -v wechat-cli' "$repo_root/skills/wechat-cli/scripts/reader.sh"; then
   echo "The public wrapper must not silently discover an old wechat-cli installation." >&2

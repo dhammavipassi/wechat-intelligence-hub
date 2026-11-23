@@ -7,9 +7,11 @@ PROJECT_DIR="${WECHAT_HUB_HOME:-}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 
 if [ -z "$PROJECT_DIR" ]; then
+  codex_root="${CODEX_HOME:-$HOME/.codex}"
   for candidate in \
     "$PWD" \
-    "$SCRIPT_DIR/../../../../projects/wechat-intelligence-hub" \
+    "$SCRIPT_DIR/../../../projects/wechat-intelligence-hub" \
+    "$codex_root/share/wechat-intelligence-hub/projects/wechat-intelligence-hub" \
     "$SCRIPT_DIR/../../../share/wechat-intelligence-hub/projects/wechat-intelligence-hub" \
     "$HOME/wechat-intelligence-hub" \
     "$HOME/Documents/wechat-intelligence-hub"

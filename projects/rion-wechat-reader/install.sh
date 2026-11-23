@@ -33,6 +33,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --zstandard-wheel)
       [ "$#" -ge 2 ] || { echo "--zstandard-wheel 需要一个 wheel 文件" >&2; exit 2; }
+      with_sqlcipher=1
       zstandard_wheel="$2"
       shift 2
       ;;

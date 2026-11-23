@@ -149,8 +149,9 @@ def main() -> None:
     root = Path(args.root).expanduser().resolve()
     out = Path(args.out).expanduser()
     if not out.is_absolute():
-        out = (root / out).resolve()
-    if out == root or root in out.parents and out.name in {"output", "contacts", "config"}:
+        out = root / out
+    out = out.resolve()
+    if out == root or out in root.parents or (root in out.parents and out.name in {"output", "contacts", "config"}):
         raise SystemExit("发布目录不能覆盖项目、output、contacts 或 config。")
     try:
         report = build_release(root, out)

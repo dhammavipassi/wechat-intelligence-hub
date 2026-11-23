@@ -115,9 +115,9 @@ cp config/profile.example.json config/profile.local.json
 2. 环境变量 `WECHAT_HUB_PROFILE`
 3. 项目内 `config/profile.local.json`
 4. `~/.config/wechat-intelligence-hub/profile.json`
+5. 内置公开默认配置
 
 如果某个群已有成员定时发布图片日报，可在 Profile 中用 `group_recap_senders` 配置发布者，再用 `group_recap_time_windows` 限定常见发布时段。这些日报只会进入独立索引，不再作为本系统的主题、关键发言或商机证据。
-5. 内置公开默认配置
 
 指定其他 Profile 时，`--profile` 放在子命令前：
 
