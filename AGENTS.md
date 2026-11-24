@@ -2,89 +2,36 @@
 type: project
 status: active
 scope: repo
-updated: 2026-11-23
+updated: 2026-11-24
 ---
 
-# WeChat Intelligence Hub 准入契约与架构规范
+# WeChat Intelligence Hub
 
-> 上级规则：
-> - `~/.config/ai-instructions/AGENTS.md`（全局工程规则）
-> - `~/Github_projects/AGENTS.md`（工作库根准入与领域矩阵）
-> - `~/Github_projects/intelligence-pipelines/AGENTS.md`（自动化管道领域准入）
+## 定位与架构
 
-## 1. 定位与职责
-
-`wechat-intelligence-hub` 是 `wechat` skill 的底层只读微信采集与确定性情报加工引擎（fork 自 `Rion-Wu-tech/wechat-intelligence-hub`）：
-
-- **Layer 1（`projects/rion-wechat-reader/`）**：洁净室只读微信数据库读取器，通过临时快照 + WAL 检查点 + SQLCipher / Zstd 只读打开微信本地库，支持会话、时间线、检索、增量游标 `tail` 与通知中心降级读取。
-- **Layer 2（`projects/wechat-intelligence-hub/`）**：本地确定性情报分析引擎，维护 `~/.wechat-intelligence-hub/radar.db`，产出群聊日报、人物上下文、待回复检查、主题聚合、商机雷达与经 `nh3` + CSP 净化的交互式 HTML 报告包。
-- **严禁写微信**：本引擎只读本机微信数据，不发送消息、不操作微信 UI。
-
-## 2. 架构总览
+`wechat` skill 底层洁净室只读采集与确定性情报引擎（fork 自 `Rion-Wu-tech/wechat-intelligence-hub`，受 `[upstream-guard]` 保护）：
+- **Layer 1 (`projects/rion-wechat-reader/`)**：临时快照 + WAL 检查点 + SQLCipher/Zstd `mode=ro` 只读微信库与通知中心降级读取。
+- **Layer 2 (`projects/wechat-intelligence-hub/`)**：维护 `~/.wechat-intelligence-hub/radar.db`，产出群聊日报、人物上下文、待回复、商机雷达及 `nh3` + CSP 净化 HTML 报告。
 
 ```mermaid
-flowchart TD
-    Caller["WeChat Skill (wx.sh reader / hub)"]
-    Config["Per-Account Config (~/.config/rion-wechat-reader/wxid_*.json + keys.json)"]
-    Profile["User Profile (~/.config/wechat-intelligence-hub/profile.json)"]
-    LiveDB["Live WeChat WCDB/SQLite + WAL/SHM"]
-    NotifDB["macOS Notification Center DB (incoming preview fallback)"]
-
-    subgraph ReaderLayer["Layer 1: Clean-Room Read-Only Reader (projects/rion-wechat-reader)"]
-        ReaderSh["skills/wechat-cli/scripts/reader.sh"]
-        ReaderPy["rion_wechat_reader.py"]
-        Snap["Snapshot + WAL Checkpoint (private temp dir, mode=ro)"]
-        AccessPy["rion_wechat_access.py (opt-in onboarding / diagnose)"]
-    end
-
-    subgraph HubLayer["Layer 2: Deterministic Intelligence Engine (projects/wechat-intelligence-hub)"]
-        HubSh["skills/wechat-intelligence-hub/scripts/hub.sh"]
-        HubPy["wechat_intelligence_hub.py"]
-        Views["intelligence_views.py (home / brief / person / reply / topic)"]
-        OppStore["opportunity_store.py (candidate to opportunity lifecycle)"]
-        RadarDB["Local Intelligence Store (~/.wechat-intelligence-hub/radar.db + FTS)"]
-        Renderer["report_bundle_html.py + report_security.py (Pandoc + nh3 + CSP)"]
-    end
-
-    Outputs["Deliverables (Markdown + wechat-report/ + Interactive HTML)"]
-
-    Caller -->|"reader subcommand"| ReaderSh
-    Caller -->|"hub subcommand"| HubPy
-    HubSh --> HubPy
-    ReaderSh --> ReaderPy
-    Config --> ReaderPy
-    LiveDB -->|"copy + fingerprint check"| Snap
-    Snap -->|"SQLCipher / Zstd read-only"| ReaderPy
-    NotifDB -.->|"degraded fallback"| ReaderPy
-    AccessPy -.->|"explicit user consent only"| Config
-
-    HubPy -->|"JSON CLI (compat-check / sessions / timeline / search)"| ReaderSh
-    Profile --> HubPy
-    HubPy --> RadarDB
-    HubPy --> Views
-    HubPy --> OppStore
-    Views --> RadarDB
-    OppStore --> RadarDB
-    HubPy --> Renderer
-    Renderer --> Outputs
+flowchart LR
+    Skill["wechat skill (wx.sh)"] --> Reader["Layer 1: rion_wechat_reader.py (Snapshot + SQLCipher ro)"]
+    Skill --> Hub["Layer 2: wechat_intelligence_hub.py"]
+    LiveDB["WeChat WCDB / NotifDB"] -->|"copy ro"| Reader
+    Reader -->|"JSON CLI"| Hub
+    Hub --> Radar["~/.wechat-intelligence-hub/radar.db + nh3/CSP HTML Report"]
 ```
 
-## 3. 权威文档与读取顺序
+## 硬约束
 
-1. 本文件（架构图 SSOT、运行边界与验收入口）
-2. [`README.md`](README.md)（项目总览与安装入口）
-3. [`docs/USAGE.md`](docs/USAGE.md)（命令行参考）
-4. [`projects/wechat-intelligence-hub/docs/architecture.md`](projects/wechat-intelligence-hub/docs/architecture.md)（Hub 内部设计）
+1. **只读与上游保护**：严禁发送微信消息或操作微信 UI；保留上游 `docs/` 与核心模块结构以便 `upstream` 合并，不提交个人配置、密钥、导出记录与本地数据库。
+2. **环境与安全删除**：Hub 测试使用 `projects/wechat-intelligence-hub/.venv/bin/python`（含 `nh3`），Reader 自动解析 `~/.local/share/rion-wechat-cli/venv/bin/python`；清理临时产物一律 `mv` 至 `~/.Trash/`。
 
-## 4. 运行与验证
+## 验收
 
-- Hub HTML 渲染与安全测试依赖 `projects/wechat-intelligence-hub/.venv/bin/python`（含 `nh3`）。
-- Reader SQLCipher / Zstd 依赖由 `reader.sh` / `access.sh` 自动解析 `~/.local/share/rion-wechat-cli/venv/bin/python`。
-- 验收命令：
-  ```bash
-  PYTHON_BIN=./projects/wechat-intelligence-hub/.venv/bin/python ./scripts/validate.sh
-  ```
-- 临时目录与构建产物清理一律移入 `~/.Trash/`，禁止提交个人配置、密钥、聊天导出与本地数据库。
+```bash
+PYTHON_BIN="$PWD/projects/wechat-intelligence-hub/.venv/bin/python" ./scripts/validate.sh
+```
 
 <!-- BEGIN SCOPE-LIMITS-PROJECT (generated; edit rules/scope-limits-project.md) -->
 ## 防御预算（全局强约束）
