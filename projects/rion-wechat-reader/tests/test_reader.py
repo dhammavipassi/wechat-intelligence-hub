@@ -1,11 +1,13 @@
 import hashlib
 import json
+import plistlib
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 try:
     from sqlcipher3 import dbapi2 as SQLCIPHER
@@ -1182,6 +1184,34 @@ class ReaderContractTest(unittest.TestCase):
         self.assertEqual(len(self.run_with_config(config, "sns-feed")["data"]["items"]), 1)
         media = self.run_with_config(config, "media", "team@chatroom", "--type", "image")["data"]
         self.assertEqual(len(media["resources"][0]["local_paths"]), 1)
+
+    def test_notification_records_skips_corrupt_and_non_dict_plists(self):
+        sys.path.insert(0, str(ROOT))
+        try:
+            import rion_wechat_reader as reader
+        finally:
+            if sys.path and sys.path[0] == str(ROOT):
+                sys.path.pop(0)
+        notif_db = self.data_root / "notifications.db"
+        conn = sqlite3.connect(notif_db)
+        try:
+            conn.execute("CREATE TABLE app (app_id INTEGER PRIMARY KEY, identifier TEXT)")
+            conn.execute("CREATE TABLE record (app_id INTEGER, data BLOB, delivered_date REAL)")
+            conn.execute("INSERT INTO app(app_id, identifier) VALUES (1, ?)", (reader.WECHAT_BUNDLE_ID,))
+            conn.execute("INSERT INTO record VALUES (1, ?, 700000003.0)", (b"not-a-plist",))
+            conn.execute("INSERT INTO record VALUES (1, ?, 700000002.0)", (plistlib.dumps(["not", "a", "dict"]),))
+            conn.execute(
+                "INSERT INTO record VALUES (1, ?, 700000001.0)",
+                (plistlib.dumps({"titl": "Alice", "body": "hello preview"}),),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        with mock.patch.object(reader, "DEFAULT_NOTIFICATIONS_DB", notif_db):
+            rows = reader.notification_records(limit=10, after=None, keyword=None)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["sender"], "Alice")
+        self.assertEqual(rows[0]["text"], "hello preview")
 
 
 if __name__ == "__main__":

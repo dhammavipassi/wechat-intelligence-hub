@@ -2040,7 +2040,9 @@ def notification_records(limit: int, after: str | None, keyword: str | None) -> 
             continue
         try:
             payload = plistlib.loads(blob)
-        except Exception:
+        except (plistlib.InvalidFileException, ValueError, TypeError, OSError):
+            continue
+        if not isinstance(payload, dict):
             continue
         title = str(payload.get("titl") or payload.get("nam") or "")
         body = str(payload.get("body") or "")

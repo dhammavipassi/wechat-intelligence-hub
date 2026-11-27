@@ -723,7 +723,25 @@ def add_feedback(
                 set status = 'ignored', updated_at = ?
                 where chat = ? and status in ('new', 'active', 'waiting', 'paused')
                 """,
-                (created_at, target_key.strip()),
+                (created_at, target_key),
+            )
+        elif verdict == "low_priority":
+            conn.execute(
+                """
+                update opportunities
+                set priority = min(priority, 1), priority_locked = 1, updated_at = ?
+                where chat = ? and status in ('new', 'active', 'waiting', 'paused')
+                """,
+                (created_at, target_key),
+            )
+        elif verdict == "confirmed":
+            conn.execute(
+                """
+                update opportunities
+                set priority = max(priority, 5), updated_at = ?
+                where chat = ? and status in ('new', 'active', 'waiting', 'paused')
+                """,
+                (created_at, target_key),
             )
     elif target_type == "opportunity":
         key_clause = "opportunity_key = ?"
@@ -760,24 +778,6 @@ def add_feedback(
                 where {key_clause} and status in ('new', 'active', 'waiting', 'paused', 'stale')
                 """,
                 (created_at, created_at, lookup_key),
-            )
-        elif verdict == "low_priority":
-            conn.execute(
-                """
-                update opportunities
-                set priority = min(priority, 1), priority_locked = 1, updated_at = ?
-                where chat = ? and status in ('new', 'active', 'waiting', 'paused')
-                """,
-                (created_at, target_key.strip()),
-            )
-        elif verdict == "confirmed":
-            conn.execute(
-                """
-                update opportunities
-                set priority = max(priority, 5), updated_at = ?
-                where chat = ? and status in ('new', 'active', 'waiting', 'paused')
-                """,
-                (created_at, target_key.strip()),
             )
     return int(cursor.lastrowid)
 

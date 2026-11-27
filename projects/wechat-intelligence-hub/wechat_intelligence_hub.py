@@ -18,6 +18,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from typing import Any, Iterable
@@ -5289,7 +5290,6 @@ def build_contact_daily_rows(
         else:
             role = "新商业联系人"
         latest = messages[-1]
-        stage = str(opportunity.get("stage") or "") if opportunity else ""
         status, reply_direction = contact_daily_status(
             latest,
             self_names,
@@ -6477,7 +6477,16 @@ def run_compatibility_check(
     history_dir = state_dir / "history"
     history_dir.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
-    latest_path.write_text(payload, encoding="utf-8")
+    fd, tmp_name = tempfile.mkstemp(dir=state_dir, prefix=".latest.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, latest_path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
     history_name = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f.json")
     (history_dir / history_name).write_text(payload, encoding="utf-8")
     return report

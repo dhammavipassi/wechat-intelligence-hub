@@ -523,6 +523,18 @@ class OpportunityPipelineTests(unittest.TestCase):
         self.assertEqual(feedback[0]["target_type"], "opportunity")
         self.assertEqual(feedback[0]["target_key"], row["opportunity_key"])
 
+    def test_chat_feedback_updates_existing_open_opportunities(self) -> None:
+        self.sync([message("2026-07-30 09:00:00", "品牌合作预算5000元", chat="品牌方A")])
+        self.sync([message("2026-07-30 09:05:00", "有个小合作聊聊", chat="品牌方B")])
+
+        opportunity_store.add_feedback(self.conn, "chat", "品牌方A", "low_priority", "降级")
+        opportunity_store.add_feedback(self.conn, "chat", "品牌方B", "confirmed", "重点确认")
+
+        rows_by_chat = {row["chat"]: row for row in opportunity_store.list_opportunities(self.conn)}
+        self.assertEqual(rows_by_chat["品牌方A"]["priority"], 1)
+        self.assertEqual(rows_by_chat["品牌方A"]["priority_locked"], 1)
+        self.assertEqual(rows_by_chat["品牌方B"]["priority"], 5)
+
 
 if __name__ == "__main__":
     unittest.main()

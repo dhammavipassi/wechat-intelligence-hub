@@ -311,7 +311,7 @@ def home_report(
         "",
         f"- **立即处理**：{due_opportunities} 个已到期跟进；优先运行 `today`。",
         f"- **值得关注**：近 24 小时有 {inbox_count} 个高优先级待分流候选；运行 `inbox`。",
-        f"- **仅供存档**：其余消息保留在本地索引，可通过 `topic`、`person` 或 `db-search` 按需检索。",
+        "- **仅供存档**：其余消息保留在本地索引，可通过 `topic`、`person` 或 `db-search` 按需检索。",
     ]
     metadata = {
         "messages": total_messages,
