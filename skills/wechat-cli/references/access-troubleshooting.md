@@ -27,7 +27,7 @@ Windows 的平台入口、DLL候选转换、SQLCipher、ACL与文本验收见 [W
 | 状态或信号 | 应做的检查 | 不应做的事 |
 |---|---|---|
 | `ready` | 抽检群聊、私聊、标签和时间范围，直接使用 | 重取key |
-| `existing_provider_material_available` | 仅表示已知wxcli材料文件存在。确认是本账号材料后，用`onboard --source`显式验证 | 当成已验证key，或无视它再获取 |
+| `existing_provider_material_available` | 仅表示固定清单里某个已知工具的输出文件存在（wxkey、wechat-cli、wcdb-key-tool），见`material_candidates`。确认是本账号材料后，对`importable:true`的文件用`onboard --source`显式验证；口令格式先保留 | 当成已验证key，或无视它再获取 |
 | `dependency_required` | 检查实际CLI解释器的SQLCipher/zstandard；使用安装脚本提供的独立环境 | 以为系统Python装了包就一定可用 |
 | `zstandard_driver_required` | 引擎解释器缺zstandard（WCDB压缩消息）。`reader.sh`已自行解析合格解释器；被消费方venv的PATH覆盖时，显式设`RION_WECHAT_READER_PYTHON` | 把消费方管道venv当作Reader运行时，或只看`reader history`的rc码不看引擎错误JSON |
 | `account_selection_required` | 请用户确认唯一目标账号 | 根据目录修改时间猜账号 |

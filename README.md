@@ -24,7 +24,12 @@ Rion 的通用 Skill 合集 `rionwu-skills` 只负责收录、发现和链接本
 
 ## 安装
 
-**接入能力：** 支持材料编码/格式兼容、明确错误码、独立解密计数和`diagnose`诊断。JEV可选辅助分流，但不参与密钥验证；Windows首次获取仍待真机验收。见[接入与排障说明](docs/access-upgrade-2026-09-22.md)。
+**10月5日接入与草稿更新：** 修复等价key写法误判冲突、混合映射丢失和部分数据库路径匹配问题；新增独立、默认关闭的“确认后填入当前微信输入框”实验模块，仍需用户手动发送。首次获取兼容性尚不能保证，详见[范围与验证记录](docs/access-and-drafts-2026-10-05.md)。
+
+**10月3日可靠性更新：** 长时间范围的简报不再漏掉最新消息，合作前问发票不再被判成待结算，等待中的商机必须带跟进日期，回复草稿不再编造之前的报价；HTML 报告新增三套可切换风格和亮暗模式。首次获取 key 的状态没有变化。见[更新说明](docs/reliability-upgrade-2026-10-03.md)。
+
+**9月22日接入更新：** 已增加材料编码/格式兼容、明确错误码、独立解密计数和`diagnose`诊断。JEV可选辅助分流，但不参与密钥验证；Windows首次获取仍待真机验收。见[更新与排障提示词](docs/access-upgrade-2026-09-22.md)。
+
 
 向维护者反馈前，让本地Codex运行`access.sh diagnose --support-summary`；Windows用Reader环境的Python运行`rion_wechat_access.py diagnose --support-summary`。它只输出允许分享的版本、状态、计数和错误码，仍请本人检查后再发。只有网页对话、没有本机文件及命令执行能力时，无法直接接入本机微信。另一个工具已能读取时，优先验证已有材料或已解密数据库，不要求重新获取；见[常见卡点处理](docs/access-support.md)。
 
@@ -173,13 +178,30 @@ wechat_daily_report.html      # 旗舰交互式报告
 
 HTML 版支持全局搜索、分区导航、话题日报/重点群聊/群聊筛选切换、群聊展开、原链接跳转、明暗主题、打印和当前分区 Markdown 下载。报告内容会根据每位使用者的本地聊天、个人 Profile 和当前计划生成，界面与公开仓库中的旗舰渲染器保持一致。
 
+以下截图全部使用虚构示例数据生成，人名、群名、品牌和金额均不对应真实对象：
+
+![综合行动报告](docs/images/report-overview.png)
+
+| 群聊日报 · 话题 | 群聊日报 · 全部群聊筛选 |
+|---|---|
+| ![话题日报](docs/images/report-group-topics.png) | ![群聊筛选](docs/images/report-group-selector.png) |
+| **重点联系人** | **手机端** |
+| ![重点联系人](docs/images/report-contacts.png) | <img src="docs/images/report-mobile.png" alt="手机端综合行动报告" width="280"> |
+
+示例素材在 [samples/demo-report](projects/wechat-intelligence-hub/samples/demo-report)，可以自己重新渲染：
+
+```bash
+cd projects/wechat-intelligence-hub
+.venv/bin/python wechat_intelligence_hub.py render-bundle samples/demo-report --title "微信情报日报（示例）"
+```
+
 除了按时间生成综合报告，还可以围绕某条信息、某个人、某个群、某个产品/物品、某个微信标签、某个项目或某件具体事件定向查找：系统会先定位相关消息和上下文，再按会话、时间和事件关系去重总结。单个对象和回复建议默认直接在 Codex 中回答，不会为了一个简单问题额外生成网页。如果希望定向调查也保存成双版本，请在请求中明确说“同时输出 Markdown 和 HTML”。
 
 更完整的首次使用、常用提问、输出模式和命令行说明见 [`docs/USAGE.md`](docs/USAGE.md)。
 
 ## 隐私与安全
 
-- 微信相关能力只读，不发送消息，不操作微信 UI。
+- Reader、检索和报告保持只读，不发送消息。可选的 [reply-draft 实验模块](skills/wechat-intelligence-hub/references/reply-staging.md) 仅在用户逐条确认后向当前微信输入框填入纯文本，由用户手动发送；默认不执行、不切换会话，也不承诺规避平台风控。
 - 真实聊天、联系人、Profile、数据库和输出报告不得提交到 Git。
 - 仓库中的聊天、账号、品牌和金额样例均应为虚构数据。
 - Reader 的数据库兼容性可能随微信版本变化；通知预览只是入站、非完整的降级来源。
